@@ -1,4 +1,4 @@
-import { Settings } from 'lucide-react';
+import { Settings, Dot } from 'lucide-react';
 import type { Transform } from '../DataModel';
 
 export interface SelectedInfo {
@@ -11,13 +11,41 @@ export interface SelectedInfo {
 interface PropertiesPanelProps {
     selectedInfo: SelectedInfo | null;
     onTransformChange: (field: keyof Transform, value: number) => void;
+    /** Current editor mode */
+    mode?: 'edit' | 'animation';
+    /** Whether animation is currently playing */
+    isPlaying?: boolean;
+    /** Whether recording mode is active */
+    isRecording?: boolean;
+    /** Whether there are unsaved pending edits (animation mode, not recording) */
+    hasPendingEdits?: boolean;
 }
 
-export function PropertiesPanel({ selectedInfo, onTransformChange }: PropertiesPanelProps) {
+export function PropertiesPanel({
+    selectedInfo,
+    onTransformChange,
+    mode = 'edit',
+    isPlaying = false,
+    isRecording = false,
+    hasPendingEdits = false,
+}: PropertiesPanelProps) {
+    // Fields are read-only when animation is playing
+    const isReadOnly = isPlaying;
+
     return (
         <div className="w-64 bg-[#333333] border-l border-[#1a1a1a] flex flex-col">
             <div className="p-2 bg-[#383838] border-b border-[#222] font-semibold flex items-center gap-2 text-xs">
                 <Settings size={14} /> Properties
+                {mode === 'animation' && (
+                    <span className={`ml-auto px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                        isRecording ? 'bg-red-600 text-white animate-pulse' :
+                        isPlaying   ? 'bg-yellow-600 text-white' :
+                        hasPendingEdits ? 'bg-orange-500 text-white' :
+                        'bg-blue-700 text-white'
+                    }`}>
+                        {isRecording ? '● REC' : isPlaying ? '▶ PLAY' : hasPendingEdits ? '✎ 未保存' : 'ANIM'}
+                    </span>
+                )}
             </div>
             <div className="flex-1 overflow-y-auto p-3 space-y-4">
                 {selectedInfo ? (
@@ -29,6 +57,13 @@ export function PropertiesPanel({ selectedInfo, onTransformChange }: PropertiesP
                                 <div className="mt-0.5">Parent: <span className="text-blue-300">{selectedInfo.parent}</span></div>
                             )}
                         </div>
+
+                        {/* Animation mode unsaved hint */}
+                        {mode === 'animation' && !isPlaying && !isRecording && hasPendingEdits && (
+                            <div className="text-[10px] text-orange-400 flex items-center gap-1">
+                                <Dot size={12} /> 修改未保存，切换帧/播放后将丢弃
+                            </div>
+                        )}
 
                         {/* Transform Group */}
                         <div>
@@ -50,10 +85,19 @@ export function PropertiesPanel({ selectedInfo, onTransformChange }: PropertiesP
                                             <input
                                                 type="number"
                                                 step={step || 1}
-                                                className="w-full bg-[#222] border border-[#444] rounded px-2 py-1 outline-none focus:border-blue-500 text-xs"
+                                                disabled={isReadOnly}
+                                                className={`w-full bg-[#222] border rounded px-2 py-1 outline-none text-xs transition-colors ${
+                                                    isReadOnly
+                                                        ? 'border-[#333] text-gray-600 cursor-not-allowed'
+                                                        : 'border-[#444] focus:border-blue-500 cursor-text'
+                                                }`}
                                                 value={parseFloat((selectedInfo.transform[field]).toFixed(2))}
-                                                onChange={(e) => onTransformChange(field, parseFloat(e.target.value) || 0)}
+                                                onChange={(e) => {
+                                                    if (isReadOnly) return;
+                                                    onTransformChange(field, parseFloat(e.target.value) || 0);
+                                                }}
                                                 onMouseDown={(e) => {
+                                                    if (isReadOnly) return;
                                                     e.preventDefault();
                                                     const startX = e.clientX;
                                                     const startValue = selectedInfo.transform[field];

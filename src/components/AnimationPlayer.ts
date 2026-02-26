@@ -1,4 +1,4 @@
-import type { AnimationData, BoneTimeline, Transform } from "../DataModel";
+import type { AnimationData, BoneTimeline, BezierCurve, Transform } from "../DataModel";
 
 /**
  * Evaluates animation keyframes to produce per-bone transform deltas at the given frame.
@@ -12,14 +12,55 @@ interface BoneAnimTransform {
     scaleY: number;
 }
 
+// ─── Bezier Curve Interpolation ───────────────────────────────────────────────
+
 /**
- * Interpolate between two values using linear easing.
- * tweenEasing: null = no interpolation (hold), 0 = linear, other values reserved for curves.
+ * Solve for the parameter t on the x-axis of a cubic Bezier curve
+ * using Newton-Raphson iteration, then return the y value at that t.
+ *
+ * The curve is defined in [0,1]×[0,1] space where:
+ *   P0=(0,0), P1=(cx1,cy1), P2=(cx2,cy2), P3=(1,1)
  */
-function lerp(a: number, b: number, t: number, tweenEasing: number | null): number {
-    if (tweenEasing === null) return a; // No tween = hold value
-    return a + (b - a) * t;
+function bezierInterpolate(normalizedTime: number, curve: BezierCurve): number {
+    const { cx1, cy1, cx2, cy2 } = curve;
+
+    // Cubic Bezier x(t) and y(t)
+    const bx = (t: number) => 3 * (1 - t) * (1 - t) * t * cx1 + 3 * (1 - t) * t * t * cx2 + t * t * t;
+    const by = (t: number) => 3 * (1 - t) * (1 - t) * t * cy1 + 3 * (1 - t) * t * t * cy2 + t * t * t;
+
+    // Derivative dx/dt
+    const dbx = (t: number) => 3 * ((1 - t) * (1 - t) * cx1 + 2 * (1 - t) * t * (cx2 - cx1) + t * t * (1 - cx2));
+
+    // Clamp edge cases
+    if (normalizedTime <= 0) return 0;
+    if (normalizedTime >= 1) return 1;
+
+    // Newton-Raphson to solve bx(t) = normalizedTime
+    let t = normalizedTime; // Initial guess
+    for (let i = 0; i < 12; i++) {
+        const x = bx(t) - normalizedTime;
+        const dx = dbx(t);
+        if (Math.abs(x) < 1e-6) break;
+        if (Math.abs(dx) < 1e-10) break;
+        t -= x / dx;
+        t = Math.max(0, Math.min(1, t));
+    }
+
+    return by(t);
 }
+
+/**
+ * Interpolate between two values.
+ * @param curve  - Use bezier curve if provided
+ * @param tweenEasing - null = hold (no interpolation), 0 = linear
+ */
+function lerpWithCurve(a: number, b: number, t: number, tweenEasing: number | null, curve?: BezierCurve): number {
+    if (tweenEasing === null && !curve) return a; // Hold frame
+    const easedT = curve ? bezierInterpolate(t, curve) : t;
+    return a + (b - a) * easedT;
+}
+
+// ─── Keyframe Finding ─────────────────────────────────────────────────────────
 
 /**
  * Find the current keyframe and interpolation factor for a given frame position.
@@ -43,6 +84,8 @@ function findKeyframe<T extends { duration: number; tweenEasing: number | null }
     return [frames.length - 1, 1];
 }
 
+// ─── Per-Bone Timeline Evaluation ─────────────────────────────────────────────
+
 /**
  * Evaluate a bone's animation transform at a given frame.
  */
@@ -55,9 +98,9 @@ function evaluateBoneTimeline(timeline: BoneTimeline, currentFrame: number): Bon
         if (idx >= 0) {
             const kf = timeline.translateFrame[idx];
             const next = timeline.translateFrame[idx + 1];
-            if (next && kf.tweenEasing !== null) {
-                result.x = lerp(kf.x, next.x, t, kf.tweenEasing);
-                result.y = lerp(kf.y, next.y, t, kf.tweenEasing);
+            if (next && (kf.tweenEasing !== null || kf.curve)) {
+                result.x = lerpWithCurve(kf.x, next.x, t, kf.tweenEasing, kf.curve);
+                result.y = lerpWithCurve(kf.y, next.y, t, kf.tweenEasing, kf.curve);
             } else {
                 result.x = kf.x;
                 result.y = kf.y;
@@ -71,8 +114,8 @@ function evaluateBoneTimeline(timeline: BoneTimeline, currentFrame: number): Bon
         if (idx >= 0) {
             const kf = timeline.rotateFrame[idx];
             const next = timeline.rotateFrame[idx + 1];
-            if (next && kf.tweenEasing !== null) {
-                result.rotate = lerp(kf.rotate, next.rotate, t, kf.tweenEasing);
+            if (next && (kf.tweenEasing !== null || kf.curve)) {
+                result.rotate = lerpWithCurve(kf.rotate, next.rotate, t, kf.tweenEasing, kf.curve);
             } else {
                 result.rotate = kf.rotate;
             }
@@ -85,9 +128,9 @@ function evaluateBoneTimeline(timeline: BoneTimeline, currentFrame: number): Bon
         if (idx >= 0) {
             const kf = timeline.scaleFrame[idx];
             const next = timeline.scaleFrame[idx + 1];
-            if (next && kf.tweenEasing !== null) {
-                result.scaleX = lerp(kf.x, next.x, t, kf.tweenEasing);
-                result.scaleY = lerp(kf.y, next.y, t, kf.tweenEasing);
+            if (next && (kf.tweenEasing !== null || kf.curve)) {
+                result.scaleX = lerpWithCurve(kf.x, next.x, t, kf.tweenEasing, kf.curve);
+                result.scaleY = lerpWithCurve(kf.y, next.y, t, kf.tweenEasing, kf.curve);
             } else {
                 result.scaleX = kf.x;
                 result.scaleY = kf.y;
@@ -97,6 +140,8 @@ function evaluateBoneTimeline(timeline: BoneTimeline, currentFrame: number): Bon
 
     return result;
 }
+
+// ─── Public API ───────────────────────────────────────────────────────────────
 
 /**
  * Get all bone transforms for a given animation at a specific frame.

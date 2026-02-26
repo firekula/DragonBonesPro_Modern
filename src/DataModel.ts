@@ -62,18 +62,32 @@ export interface SkinData {
     slots: SkinSlotData[];
 }
 
+/**
+ * Cubic Bezier curve control points for keyframe easing.
+ * Defines a curve in the normalized [0,1] x [0,1] space,
+ * matching the DragonBones "curve" array format: [cx1, cy1, cx2, cy2]
+ */
+export interface BezierCurve {
+    cx1: number; // Control point 1 x
+    cy1: number; // Control point 1 y
+    cx2: number; // Control point 2 x
+    cy2: number; // Control point 2 y
+}
+
 // Animation keyframe types
 export interface TranslateKeyframe {
     duration: number;
     x: number;
     y: number;
-    tweenEasing: number | null; // null = no tween, number = easing type
+    tweenEasing: number | null; // null = no tween, 0 = linear, other = easing
+    curve?: BezierCurve; // Bezier curve (overrides tweenEasing if present)
 }
 
 export interface RotateKeyframe {
     duration: number;
     rotate: number; // Degrees
     tweenEasing: number | null;
+    curve?: BezierCurve;
 }
 
 export interface ScaleKeyframe {
@@ -81,6 +95,7 @@ export interface ScaleKeyframe {
     x: number; // scaleX
     y: number; // scaleY
     tweenEasing: number | null;
+    curve?: BezierCurve;
 }
 
 export interface BoneTimeline {

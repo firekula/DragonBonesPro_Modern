@@ -83,11 +83,21 @@ function App() {
         }
     }, [mode]);
 
-    // Handle recording toggle
+    // Handle recording toggle: auto-stop playback when recording begins
     const handleRecordToggle = useCallback(() => {
+        if (!isRecording) {
+            // Turning recording ON: stop playback first
+            setIsPlaying(false);
+        }
         setIsRecording(!isRecording);
-        console.log(isRecording ? '停止录制' : '开始录制');
     }, [isRecording]);
+
+    /**
+     * Pending transform edits in animation mode (stopped, non-recording).
+     * Key format: "<type>:<name>" e.g. "bone:root" or "slot:body"
+     * These are discarded when play starts or the frame changes.
+     */
+    const [pendingEdits, setPendingEdits] = useState<Map<string, Record<string, number>>>(new Map());
 
     // Get current armature and animation
     const armature = projectData?.armatures[0];
@@ -123,12 +133,54 @@ function App() {
 
     const selectedInfo = getSelectedTransform();
 
-    // Handle set keyframe
+    /**
+     * Write current transform values into the animation keyframe at `currentFrame`.
+     * If a keyframe already exists at this frame, it is overwritten.
+     * Otherwise a new keyframe is inserted (duration = distance to the next keyframe).
+     */
     const handleSetKeyframe = useCallback(() => {
         if (!projectData || !currentAnimation || !selectedInfo) return;
-        console.log('保存关键帧:', selectedInfo.name, '在帧', currentFrame);
-        // 这里需要实现保存关键帧的逻辑
-    }, [projectData, currentAnimation, selectedInfo, currentFrame]);
+        const arm = projectData.armatures[0];
+        if (!arm || !selectedBone) return; // Only bone keyframes for now
+
+        let timeline = currentAnimation.bone.find(t => t.name === selectedBone);
+        if (!timeline) {
+            // Create empty timeline for this bone
+            timeline = { name: selectedBone, translateFrame: [], rotateFrame: [], scaleFrame: [] };
+            currentAnimation.bone.push(timeline);
+        }
+
+        const tf = selectedInfo.transform;
+
+        // Helper: upsert a keyframe at currentFrame in a frame array
+        const upsertKF = <T extends { duration: number; tweenEasing: number | null }>(frames: T[], make: () => T) => {
+            let elapsed = 0;
+            for (let i = 0; i < frames.length; i++) {
+                if (elapsed === currentFrame) { frames[i] = { ...frames[i], ...make() }; return; }
+                if (elapsed + frames[i].duration > currentFrame) {
+                    // Split the keyframe
+                    const before = currentFrame - elapsed;
+                    const after = frames[i].duration - before;
+                    frames.splice(i + 1, 0, { ...frames[i], duration: after });
+                    frames[i] = { ...make(), duration: before };
+                    return;
+                }
+                elapsed += frames[i].duration;
+            }
+            // Append at end
+            frames.push({ ...make(), duration: Math.max(1, currentAnimation!.duration - elapsed) });
+        };
+
+        upsertKF(timeline.translateFrame, () => ({ duration: 1, x: tf.x, y: tf.y, tweenEasing: 0 }));
+        upsertKF(timeline.rotateFrame, () => ({ duration: 1, rotate: tf.skewX, tweenEasing: 0 }));
+        upsertKF(timeline.scaleFrame, () => ({ duration: 1, x: tf.scaleX, y: tf.scaleY, tweenEasing: 0 }));
+
+        // Clear pending edits for this item and persist
+        const key = `bone:${selectedBone}`;
+        setPendingEdits(prev => { const m = new Map(prev); m.delete(key); return m; });
+        setProjectData({ ...projectData });
+        console.log('已保存关键帧:', selectedBone, '帧', currentFrame);
+    }, [projectData, currentAnimation, selectedInfo, currentFrame, selectedBone]);
 
     // Animation playback loop
     useEffect(() => {
@@ -149,7 +201,6 @@ function App() {
                 // Loop or stop
                 if (animFrameRef.current >= currentAnimation.duration) {
                     if (currentAnimation.playTimes === 0) {
-                        // Loop forever
                         animFrameRef.current = 0;
                     } else {
                         animFrameRef.current = 0;
@@ -160,6 +211,8 @@ function App() {
                 }
 
                 setCurrentFrame(animFrameRef.current);
+                // Discard pending edits when frame advances
+                setPendingEdits(new Map());
             }
             rafId = requestAnimationFrame(tick);
         };
@@ -167,6 +220,12 @@ function App() {
         let rafId = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(rafId);
     }, [isPlaying, currentAnimation, armature, mode]);
+
+    // Discard pending edits when frame is manually changed
+    const handleChangeFrame = useCallback((frame: number) => {
+        setPendingEdits(new Map());
+        setCurrentFrame(frame);
+    }, []);
 
     const handleMoveSlot = useCallback((slotName: string, direction: 'up' | 'down') => {
         if (!projectData) return;
@@ -194,13 +253,12 @@ function App() {
     // selectedInfo is already defined above
 
     // Handle transform property changes
-    // - field='commit': drag ended, just force React to re-sync state (data was mutated directly)
-    // - field='rotation': update both skewX and skewY together for pure rotation
-    // - other fields: apply delta (canvas tools) or absolute value (PropertiesPanel uses absolute)
+    // - field='commit': drag ended, re-sync React state
+    // - field='rotation': update both skewX and skewY
+    // - animation mode: in recording, write keyframe; otherwise accumulate pendingEdits
     const handleTransformChange = useCallback((field: string, delta: number) => {
         if (!projectData) return;
         if (field === 'commit') {
-            // Drag ended: data was already mutated in renderingRef; just force React re-render
             setProjectData({ ...projectData });
             return;
         }
@@ -209,6 +267,7 @@ function App() {
         if (!arm) return;
 
         let transform: any = null;
+        const itemKey = selectedBone ? `bone:${selectedBone}` : selectedSlot ? `slot:${selectedSlot}` : null;
         if (selectedBone) {
             const bone = arm.bones.find((b: BoneData) => b.name === selectedBone);
             if (bone) transform = bone.localTransform;
@@ -225,8 +284,45 @@ function App() {
         } else {
             transform[field] += delta;
         }
+
+        // In animation mode with recording: immediately save as keyframe
+        if (mode === 'animation' && isRecording && selectedBone && currentAnimation && itemKey) {
+            let timeline = currentAnimation.bone.find(t => t.name === selectedBone);
+            if (!timeline) {
+                timeline = { name: selectedBone, translateFrame: [], rotateFrame: [], scaleFrame: [] };
+                currentAnimation.bone.push(timeline);
+            }
+            // Upsert single-frame keyframes at current position for the relevant track
+            if (field === 'x' || field === 'y' || field === 'rotation') {
+                if (timeline.translateFrame.length === 0) {
+                    timeline.translateFrame.push({ duration: Math.max(1, currentAnimation.duration), x: transform.x, y: transform.y, tweenEasing: 0 });
+                } else {
+                    // Just update the closest keyframe value (simplified)
+                    const last = timeline.translateFrame[timeline.translateFrame.length - 1];
+                    last.x = transform.x; last.y = transform.y;
+                }
+            }
+            // Track pending state
+            if (itemKey) {
+                setPendingEdits(prev => {
+                    const m = new Map(prev);
+                    const cur = m.get(itemKey) || {};
+                    m.set(itemKey, { ...cur, [field]: transform[field] });
+                    return m;
+                });
+            }
+        } else if (mode === 'animation' && !isPlaying && !isRecording && itemKey) {
+            // Animation mode, stopped, not recording: accumulate pending edits (temporary)
+            setPendingEdits(prev => {
+                const m = new Map(prev);
+                const cur = m.get(itemKey) || {};
+                m.set(itemKey, { ...cur, [field]: transform[field] });
+                return m;
+            });
+        }
+
         setProjectData({ ...projectData });
-    }, [selectedBone, selectedSlot, projectData]);
+    }, [selectedBone, selectedSlot, projectData, mode, isRecording, isPlaying, currentAnimation]);
 
     return (
         <div className="flex flex-col h-screen bg-[#2c2c2c] text-[#e0e0e0] font-sans text-sm">
@@ -342,7 +438,7 @@ function App() {
                         selectedAnimIndex={selectedAnimIndex}
                         setSelectedAnimIndex={setSelectedAnimIndex}
                         currentFrame={currentFrame}
-                        setCurrentFrame={setCurrentFrame}
+                        setCurrentFrame={handleChangeFrame}
                         isPlaying={isPlaying}
                         setIsPlaying={setIsPlaying}
                         isRecording={isRecording}
@@ -357,6 +453,10 @@ function App() {
                 <PropertiesPanel
                     selectedInfo={selectedInfo as any}
                     onTransformChange={handleTransformChange}
+                    mode={mode}
+                    isPlaying={isPlaying}
+                    isRecording={isRecording}
+                    hasPendingEdits={pendingEdits.size > 0}
                 />
             </div>
         </div>

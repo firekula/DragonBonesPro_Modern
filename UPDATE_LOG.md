@@ -1,6 +1,32 @@
-# 更新日志 (UPDATE_LOG)
-
 ## 2026-02-26
+
+### v0.9.2 — 动画模式编辑系统
+
+- **新增** 录制模式自动停止播放：点击录制按钮时若正在播放，先暂停再开启录制
+- **新增** `pendingEdits` 临时编辑状态：动画模式停止+非录制时，修改骨骼 transform 只临时生效，切换帧或播放时自动丢弃（防误操作）
+- **新增** `handleSetKeyframe`：将当前 transform 写入 `currentFrame` 处的关键帧；已有关键帧则覆盖，否则分割插入
+- **新增** `handleChangeFrame`（`App.tsx`）封装帧切换，切换时清空 `pendingEdits`
+- **修改** `PropertiesPanel.tsx`：
+    - 新增 `mode/isPlaying/isRecording/hasPendingEdits` props
+    - 播放时所有字段禁用（灰色 + `disabled`）
+    - 动画模式徽章：`● REC`（录制中）/ `▶ PLAY`（播放中）/ `✎ 未保存`（有待定修改）/ `ANIM`
+    - 有未保存修改时显示提示："修改未保存，切换帧/播放后将丢弃"
+
+### v0.9.1 — 贝塞尔曲线补间动画
+
+- **新增** `DataModel.ts`：`BezierCurve` 接口（cx1, cy1, cx2, cy2），所有关键帧类型添加 `curve?: BezierCurve` 字段
+- **新增** `ProjectParser.ts`：解析 DragonBones 关键帧 `curve` 数组（4 个控制点）→ `BezierCurve` 对象
+- **新增** `AnimationPlayer.ts`：
+    - `bezierInterpolate(normalizedTime, curve)` — Newton-Raphson 迭代求解三次贝塞尔曲线 x(t)=normalizedTime，返回对应 y(t) 值
+    - `lerpWithCurve(a, b, t, tweenEasing, curve?)` — curve 优先于 tweenEasing；都不存在则 hold 帧
+    - 所有插值（translate / rotate / scale）改用 `lerpWithCurve`
+
+### v0.9.0 — 修复控制点拖动时消失
+
+- **修复** `CanvasRenderer.tsx`：拖动期间控制点消失问题
+    - 新增 `updateBonesAndSprites()` 轻量更新函数：只刷新骨骼线框和精灵位置，**不清除 outlineLayer**（控制点层）
+    - `applyDeltaDirectly` 改为调用 `updateBonesAndSprites()`，拖动期间控制点保持可见，无闪烁
+    - `handleToolDragEnd` 松手后先调用完整 `updateRendering()` 重建控制点，再发 `commit` 同步状态
 
 ### v0.8.3 — 编辑工具拖动交互全面重构（消除闪烁 + 坐标系修正）
 

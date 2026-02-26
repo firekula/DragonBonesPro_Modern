@@ -283,6 +283,10 @@ function parseArmature(rawObj: any): ArmatureData {
                                 x: kf.x || 0,
                                 y: kf.y || 0,
                                 tweenEasing: kf.tweenEasing !== undefined ? kf.tweenEasing : null,
+                                curve:
+                                    Array.isArray(kf.curve) && kf.curve.length >= 4
+                                        ? { cx1: kf.curve[0], cy1: kf.curve[1], cx2: kf.curve[2], cy2: kf.curve[3] }
+                                        : undefined,
                             });
                         }
                     }
@@ -294,6 +298,10 @@ function parseArmature(rawObj: any): ArmatureData {
                                 duration: kf.duration || 0,
                                 rotate: kf.rotate || 0,
                                 tweenEasing: kf.tweenEasing !== undefined ? kf.tweenEasing : null,
+                                curve:
+                                    Array.isArray(kf.curve) && kf.curve.length >= 4
+                                        ? { cx1: kf.curve[0], cy1: kf.curve[1], cx2: kf.curve[2], cy2: kf.curve[3] }
+                                        : undefined,
                             });
                         }
                     }
@@ -306,6 +314,10 @@ function parseArmature(rawObj: any): ArmatureData {
                                 x: kf.x !== undefined ? kf.x : 1,
                                 y: kf.y !== undefined ? kf.y : 1,
                                 tweenEasing: kf.tweenEasing !== undefined ? kf.tweenEasing : null,
+                                curve:
+                                    Array.isArray(kf.curve) && kf.curve.length >= 4
+                                        ? { cx1: kf.curve[0], cy1: kf.curve[1], cx2: kf.curve[2], cy2: kf.curve[3] }
+                                        : undefined,
                             });
                         }
                     }

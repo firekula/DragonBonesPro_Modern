@@ -481,9 +481,86 @@ export function CanvasRenderer({
     }, [currentAnimation, currentFrame, selectedBone, selectedSlot, selectedTool, onSelectBone, onTransformChange]);
 
     /**
+     * Lightweight update: only refreshes bone wireframes and sprite positions.
+     * Does NOT touch outlineLayer (tool controls), so control points stay visible during drag.
+     */
+    const updateBonesAndSprites = useCallback(() => {
+        const { boneLayer, boneGraphics, slotSprites, boneJoints, armature, skinSlotMap } = renderingRef.current;
+        if (!armature || !boneGraphics) return;
+
+        const findBone = (name: string) => armature.bones.find((b: any) => b.name === name);
+        const globalTransforms: Record<string, PIXI.Matrix> = {};
+        const DEG_TO_RAD = Math.PI / 180;
+
+        const animBoneMap = currentAnimation
+            ? getAnimatedBoneTransforms(currentAnimation, currentFrame)
+            : null;
+
+        const getGlobalMatrix = (bone: any): PIXI.Matrix => {
+            if (globalTransforms[bone.name]) return globalTransforms[bone.name];
+            const localMatrix = new PIXI.Matrix();
+            let { x, y, skewX, skewY, scaleX, scaleY } = bone.localTransform;
+            const animDelta = animBoneMap?.get(bone.name);
+            if (animDelta) {
+                const animated = applyAnimationToTransform(bone.localTransform, animDelta);
+                x = animated.x; y = animated.y; skewX = animated.skewX;
+                skewY = animated.skewY; scaleX = animated.scaleX; scaleY = animated.scaleY;
+            }
+            const skXRad = skewX * DEG_TO_RAD;
+            const skYRad = skewY * DEG_TO_RAD;
+            localMatrix.a = Math.cos(skYRad) * scaleX;
+            localMatrix.b = Math.sin(skYRad) * scaleX;
+            localMatrix.c = -Math.sin(skXRad) * scaleY;
+            localMatrix.d = Math.cos(skXRad) * scaleY;
+            localMatrix.tx = x;
+            localMatrix.ty = y;
+            if (bone.parentBoneName) {
+                const parentBone = findBone(bone.parentBoneName);
+                if (parentBone) localMatrix.prepend(getGlobalMatrix(parentBone));
+            }
+            globalTransforms[bone.name] = localMatrix;
+            return localMatrix;
+        };
+
+        boneGraphics.clear();
+        boneJoints.forEach(joint => { if (joint.parent) joint.parent.removeChild(joint); });
+        boneJoints.clear();
+
+        // Update sprites
+        slotSprites.forEach((sprite, slotName) => {
+            const slot = armature.slots.find((s: any) => s.name === slotName);
+            if (!slot) return;
+            const parentBone = findBone(slot.parentBoneName);
+            if (!parentBone) return;
+            const boneMatrix = getGlobalMatrix(parentBone);
+            const skinSlot = skinSlotMap[slot.name];
+            if (!skinSlot || !skinSlot.displays || skinSlot.displays.length === 0) return;
+            const display = skinSlot.displays[slot.displayIndex] || skinSlot.displays[0];
+            if (display.type !== 'image') return;
+            const displayTransform = display.transform;
+            const displayMatrix = new PIXI.Matrix();
+            const dSkewX = displayTransform.skewX * DEG_TO_RAD;
+            const dSkewY = displayTransform.skewY * DEG_TO_RAD;
+            displayMatrix.a = Math.cos(dSkewY) * displayTransform.scaleX;
+            displayMatrix.b = Math.sin(dSkewY) * displayTransform.scaleX;
+            displayMatrix.c = -Math.sin(dSkewX) * displayTransform.scaleY;
+            displayMatrix.d = Math.cos(dSkewX) * displayTransform.scaleY;
+            displayMatrix.tx = displayTransform.x;
+            displayMatrix.ty = displayTransform.y;
+            displayMatrix.prepend(boneMatrix);
+            sprite.setFromMatrix(displayMatrix);
+        });
+
+        // Draw bone wireframes
+        BoneRenderer.drawBones(
+            armature, getGlobalMatrix, boneGraphics, boneLayer,
+            boneJoints, selectedBone, zoomRef.current, onSelectBone
+        );
+    }, [currentAnimation, currentFrame, selectedBone, onSelectBone]);
+
+    /**
      * During drag: apply delta directly to the armature transform and re-render via PIXI
-     * (bypasses React state to prevent flicker caused by re-renders on every mousemove).
-     * On drag end: call onTransformChange('commit', 0) to sync the mutated data to App.tsx.
+     * (bypasses React state to prevent flicker; only updates bones+sprites, NOT control points).
      */
     const applyDeltaDirectly = useCallback((field: string, canvasPixelDelta: number) => {
         const zoom = zoomRef.current;
@@ -509,18 +586,20 @@ export function CanvasRenderer({
         } else {
             transform[field] += worldDelta;
         }
-        // Direct PIXI re-render, no React state update = no flicker
-        updateRendering();
-    }, [selectedBone, selectedSlot, zoomRef, updateRendering]);
+        // Only refresh bones+sprites during drag; control points stay untouched = no flicker
+        updateBonesAndSprites();
+    }, [selectedBone, selectedSlot, zoomRef, updateBonesAndSprites]);
 
     const handleToolTransformChange = useCallback((field: string, canvasPixelDelta: number) => {
         applyDeltaDirectly(field, canvasPixelDelta);
     }, [applyDeltaDirectly]);
 
     const handleToolDragEnd = useCallback(() => {
+        // Full re-render after drag ends: rebuilds control points at updated position
+        updateRendering();
         // One-time commit: signal App.tsx to shallow-copy projectData so PropertiesPanel refreshes
         if (onTransformChange) onTransformChange('commit', 0);
-    }, [onTransformChange]);
+    }, [onTransformChange, updateRendering]);
 
     // Update rendering when animation/selection/tool changes (NOT on every projectData change - drags go through applyDeltaDirectly)
     useEffect(() => {
