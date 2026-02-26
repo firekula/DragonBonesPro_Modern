@@ -1,4 +1,4 @@
-import React from 'react';
+
 import { ChevronUp, ChevronDown } from 'lucide-react';
 import type { SlotData } from '../DataModel';
 

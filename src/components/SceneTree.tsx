@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import type { ArmatureData, BoneData, SlotData } from '../DataModel';
 

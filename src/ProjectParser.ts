@@ -2,7 +2,7 @@ import JSZip from "jszip";
 import { AMF3 } from "amf3-ts";
 import { Buffer } from "buffer";
 import { SymbolTypes } from "./DataModel";
-import type { ArmatureData, DragonBonesData, SlotData } from "./DataModel";
+import type { ArmatureData, DragonBonesData } from "./DataModel";
 
 const DBPROJ_KEY = "DRAGONBONES_IS_BEST";
 

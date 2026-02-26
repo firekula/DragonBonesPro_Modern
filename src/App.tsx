@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
-import { Settings, Play, Pause, SkipBack, SkipForward } from "lucide-react";
+import { Settings, Play, Pause, SkipBack, SkipForward, Circle, Save, Move, ZoomIn, RotateCw } from "lucide-react";
 import "./App.css";
 import { parseDragonBonesProject } from './ProjectParser';
 import type { DragonBonesData, BoneData, SlotData, AnimationData } from './DataModel';
@@ -18,6 +18,15 @@ function App() {
 
     // Left panel tab state
     const [leftTab, setLeftTab] = useState<'tree' | 'layers'>('tree');
+
+    // Mode state (edit mode vs animation mode)
+    const [mode, setMode] = useState<'edit' | 'animation'>('edit');
+
+    // Recording state
+    const [isRecording, setIsRecording] = useState(false);
+
+    // Editing tool state
+    const [selectedTool, setSelectedTool] = useState<'move' | 'scale' | 'rotate'>('move');
 
     // Animation state
     const [selectedAnimIndex, setSelectedAnimIndex] = useState(0);
@@ -58,14 +67,70 @@ function App() {
         setSelectedSlot(null);
     }, []);
 
+    // Handle mode change
+    const handleModeChange = useCallback(() => {
+        if (mode === 'animation') {
+            // Switch to edit mode: pause animation and reset to initial state
+            setIsPlaying(false);
+            setCurrentFrame(0);
+            setMode('edit');
+        } else {
+            // Switch to animation mode: start playing
+            setMode('animation');
+            setIsPlaying(true);
+        }
+    }, [mode]);
+
+    // Handle recording toggle
+    const handleRecordToggle = useCallback(() => {
+        setIsRecording(!isRecording);
+        console.log(isRecording ? '停止录制' : '开始录制');
+    }, [isRecording]);
+
     // Get current armature and animation
     const armature = projectData?.armatures[0];
     const animations = armature?.animations || [];
     const currentAnimation: AnimationData | null = animations[selectedAnimIndex] || null;
 
+    // Get selected item's transform for properties panel
+    const getSelectedTransform = () => {
+        if (!projectData) return null;
+        const armature = projectData.armatures[0];
+        if (!armature) return null;
+
+        if (selectedBone) {
+            const bone = armature.bones.find((b: BoneData) => b.name === selectedBone);
+            if (bone) return { name: bone.name, type: 'bone' as const, transform: bone.localTransform, parent: bone.parentBoneName };
+        }
+        if (selectedSlot) {
+            const slot = armature.slots.find((s: SlotData) => s.name === selectedSlot);
+            if (slot) {
+                // Find the slot's display transform from skins
+                const skin = armature.skins?.[0];
+                if (skin) {
+                    const skinSlot = skin.slots.find((ss: any) => ss.name === selectedSlot);
+                    if (skinSlot && skinSlot.displays?.[0]) {
+                        return { name: slot.name, type: 'slot' as const, transform: skinSlot.displays[0].transform, parent: slot.parentBoneName };
+                    }
+                }
+                return { name: slot.name, type: 'slot' as const, transform: { x: 0, y: 0, skewX: 0, skewY: 0, scaleX: 1, scaleY: 1 }, parent: slot.parentBoneName };
+            }
+        }
+        return null;
+    };
+
+    const selectedInfo = getSelectedTransform();
+
+    // Handle set keyframe
+    const handleSetKeyframe = useCallback(() => {
+        if (!projectData || !currentAnimation || !selectedInfo) return;
+        console.log('保存关键帧:', selectedInfo.name, '在帧', currentFrame);
+        // 这里需要实现保存关键帧的逻辑
+    }, [projectData, currentAnimation, selectedInfo, currentFrame]);
+
     // Animation playback loop
     useEffect(() => {
-        if (!isPlaying || !currentAnimation || currentAnimation.duration <= 0) return;
+        if (!isPlaying || !currentAnimation || currentAnimation.duration <= 0 || mode === 'edit') return;
 
         const frameRate = armature?.frameRate || 24;
         const frameDuration = 1000 / frameRate;
@@ -99,7 +164,7 @@ function App() {
 
         let rafId = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(rafId);
-    }, [isPlaying, currentAnimation, armature]);
+    }, [isPlaying, currentAnimation, armature, mode]);
 
     const handleMoveSlot = useCallback((slotName: string, direction: 'up' | 'down') => {
         if (!projectData) return;
@@ -124,40 +189,19 @@ function App() {
         setProjectData({ ...projectData });
     }, [projectData]);
 
-    // Get selected item's transform for properties panel
-    const getSelectedTransform = () => {
-        if (!projectData) return null;
-        const armature = projectData.armatures[0];
-        if (!armature) return null;
-
-        if (selectedBone) {
-            const bone = armature.bones.find((b: BoneData) => b.name === selectedBone);
-            if (bone) return { name: bone.name, type: 'bone' as const, transform: bone.localTransform, parent: bone.parentBoneName };
-        }
-        if (selectedSlot) {
-            const slot = armature.slots.find((s: SlotData) => s.name === selectedSlot);
-            if (slot) {
-                // Find the slot's display transform from skins
-                const skin = armature.skins?.[0];
-                if (skin) {
-                    const skinSlot = skin.slots.find((ss: any) => ss.name === selectedSlot);
-                    if (skinSlot && skinSlot.displays?.[0]) {
-                        return { name: slot.name, type: 'slot' as const, transform: skinSlot.displays[0].transform, parent: slot.parentBoneName };
-                    }
-                }
-                return { name: slot.name, type: 'slot' as const, transform: { x: 0, y: 0, skewX: 0, skewY: 0, scaleX: 1, scaleY: 1 }, parent: slot.parentBoneName };
-            }
-        }
-        return null;
-    };
-
-    const selectedInfo = getSelectedTransform();
+    // selectedInfo is already defined above
 
     // Handle transform property changes from the properties panel
     const handleTransformChange = useCallback((field: string, value: number) => {
         if (!selectedInfo || !projectData) return;
         // The transform object is a direct reference to the data model
-        (selectedInfo.transform as any)[field] = value;
+        if (field === 'skewX') {
+            // When changing rotation, update both skewX and skewY to avoid skew effect
+            (selectedInfo.transform as any).skewX += value;
+            (selectedInfo.transform as any).skewY += value;
+        } else {
+            (selectedInfo.transform as any)[field] += value;
+        }
         // Force re-render by shallow-copying projectData
         setProjectData({ ...projectData });
     }, [selectedInfo, projectData]);
@@ -181,6 +225,37 @@ function App() {
                     <span className="cursor-pointer hover:text-white">Edit</span>
                     <span className="cursor-pointer hover:text-white">View</span>
                     <span className="cursor-pointer hover:text-white">Help</span>
+                </div>
+                <div className="ml-auto flex items-center gap-2">
+                    <div className="flex items-center gap-1">
+                        <button
+                            onClick={() => setSelectedTool('move')}
+                            className={`p-1 rounded ${selectedTool === 'move' ? 'bg-blue-600 text-white' : 'hover:bg-[#555]'}`}
+                            title="移动工具"
+                        >
+                            <Move size={14} />
+                        </button>
+                        <button
+                            onClick={() => setSelectedTool('scale')}
+                            className={`p-1 rounded ${selectedTool === 'scale' ? 'bg-blue-600 text-white' : 'hover:bg-[#555]'}`}
+                            title="缩放工具"
+                        >
+                            <ZoomIn size={14} />
+                        </button>
+                        <button
+                            onClick={() => setSelectedTool('rotate')}
+                            className={`p-1 rounded ${selectedTool === 'rotate' ? 'bg-blue-600 text-white' : 'hover:bg-[#555]'}`}
+                            title="旋转工具"
+                        >
+                            <RotateCw size={14} />
+                        </button>
+                    </div>
+                    <button
+                        onClick={handleModeChange}
+                        className={`px-3 py-1 text-xs rounded ${mode === 'edit' ? 'bg-blue-600 text-white' : 'bg-gray-600 text-gray-300'} hover:opacity-80 transition-opacity`}
+                    >
+                        {mode === 'edit' ? '编辑模式' : '动画模式'}
+                    </button>
                 </div>
             </div>
 
@@ -248,6 +323,8 @@ function App() {
                                 onDeselect={handleDeselect}
                                 currentAnimation={isPlaying || currentFrame > 0 ? currentAnimation : null}
                                 currentFrame={currentFrame}
+                                selectedTool={selectedTool}
+                                onTransformChange={handleTransformChange}
                             />
                         ) : (
                             <>
@@ -282,7 +359,7 @@ function App() {
                                         onChange={(e) => {
                                             setSelectedAnimIndex(Number(e.target.value));
                                             setCurrentFrame(0);
-                                            setIsPlaying(false);
+                                            // 保持当前播放状态，不再停止播放
                                         }}
                                     >
                                         {animations.map((anim: AnimationData, i: number) => (
@@ -315,6 +392,19 @@ function App() {
                                 >
                                     <SkipForward size={14} />
                                 </button>
+                                <button
+                                    onClick={handleRecordToggle}
+                                    className={`p-1 hover:bg-[#555] rounded ${isRecording ? 'text-red-500' : ''}`} title={isRecording ? '停止录制' : '开始录制'}
+                                >
+                                    <Circle size={14} />
+                                </button>
+                                <button
+                                    onClick={handleSetKeyframe}
+                                    className="p-1 hover:bg-[#555] rounded" title="保存关键帧"
+                                    disabled={!selectedInfo || !currentAnimation}
+                                >
+                                    <Save size={14} />
+                                </button>
                                 <span className="text-[10px] text-gray-400 ml-2">
                                     {currentFrame} / {currentAnimation?.duration || 0}
                                 </span>
@@ -324,11 +414,17 @@ function App() {
                             {/* Bone name list */}
                             <div className="w-48 border-r border-[#1a1a1a] bg-[#333] overflow-y-auto">
                                 {currentAnimation?.bone.map((bt, i) => (
-                                    <div key={i} className="py-1 px-2 border-b border-[#222] text-xs truncate">{bt.name}</div>
+                                    <div 
+                                        key={i} 
+                                        className="py-1 px-2 border-b border-[#222] text-xs truncate cursor-pointer hover:bg-[#444]"
+                                        onClick={() => handleSelectBone(bt.name)}
+                                    >
+                                        {bt.name}
+                                    </div>
                                 ))}
                             </div>
                             {/* Frame grid */}
-                            <div className="flex-1 bg-[#1e1e1e] relative overflow-hidden">
+                            <div className="flex-1 bg-[#1e1e1e] relative overflow-auto">
                                 {/* Frame number header */}
                                 <div className="h-6 bg-[#2a2a2a] border-b border-[#222] flex items-end relative">
                                     {currentAnimation && [...Array(Math.max(currentAnimation.duration, 1))].map((_, i) => (
@@ -410,7 +506,7 @@ function App() {
                                     <div className="text-gray-400 mb-2 uppercase text-[10px] font-bold tracking-wider">
                                         Transform
                                     </div>
-                                    <div className="grid grid-cols-2 gap-2">
+                                    <div className="space-y-2">
                                         {[
                                             { label: 'X', field: 'x' },
                                             { label: 'Y', field: 'y' },
@@ -419,15 +515,37 @@ function App() {
                                             { label: 'Scale Y', field: 'scaleY', step: 0.1 },
                                             { label: 'Skew Y', field: 'skewY' },
                                         ].map(({ label, field, step }) => (
-                                            <div key={field} className="flex flex-col">
-                                                <span className="text-[10px] text-gray-500">{label}</span>
-                                                <input
-                                                    type="number"
-                                                    step={step || 1}
-                                                    className="bg-[#222] border border-[#444] rounded px-2 py-1 outline-none focus:border-blue-500 text-xs"
-                                                    value={parseFloat((selectedInfo.transform as any)[field].toFixed(2))}
-                                                    onChange={(e) => handleTransformChange(field, parseFloat(e.target.value) || 0)}
-                                                />
+                                            <div key={field} className="flex items-center gap-2">
+                                                <span className="text-[10px] text-gray-500 w-12">{label}</span>
+                                                <div className="flex-1 relative">
+                                                    <input
+                                                        type="number"
+                                                        step={step || 1}
+                                                        className="w-full bg-[#222] border border-[#444] rounded px-2 py-1 outline-none focus:border-blue-500 text-xs"
+                                                        value={parseFloat((selectedInfo.transform as any)[field].toFixed(2))}
+                                                        onChange={(e) => handleTransformChange(field, parseFloat(e.target.value) || 0)}
+                                                        onMouseDown={(e) => {
+                                                            e.preventDefault();
+                                                            const startX = e.clientX;
+                                                            const startValue = (selectedInfo.transform as any)[field];
+                                                            const stepValue = step || 1;
+
+                                                            const handleMouseMove = (moveEvent: MouseEvent) => {
+                                                                const deltaX = moveEvent.clientX - startX;
+                                                                const newValue = startValue + deltaX * stepValue * 0.1;
+                                                                handleTransformChange(field, newValue);
+                                                            };
+
+                                                            const handleMouseUp = () => {
+                                                                document.removeEventListener('mousemove', handleMouseMove);
+                                                                document.removeEventListener('mouseup', handleMouseUp);
+                                                            };
+
+                                                            document.addEventListener('mousemove', handleMouseMove);
+                                                            document.addEventListener('mouseup', handleMouseUp);
+                                                        }}
+                                                    />
+                                                </div>
                                             </div>
                                         ))}
                                     </div>

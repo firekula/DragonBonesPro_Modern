@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import * as PIXI from 'pixi.js';
-import type { DragonBonesData, BoneData, AnimationData } from '../DataModel';
+import type { DragonBonesData, AnimationData } from '../DataModel';
 import { getAnimatedBoneTransforms, applyAnimationToTransform } from './AnimationPlayer';
 
 interface CanvasRendererProps {
@@ -13,6 +13,8 @@ interface CanvasRendererProps {
     onDeselect?: () => void;
     currentAnimation?: AnimationData | null;
     currentFrame?: number;
+    selectedTool?: 'move' | 'scale' | 'rotate';
+    onTransformChange?: (field: string, value: number) => void;
 }
 
 export function CanvasRenderer({
@@ -23,8 +25,10 @@ export function CanvasRenderer({
     onSelectBone,
     onSelectSlot,
     onDeselect,
+    selectedTool = 'move',
     currentAnimation,
     currentFrame = 0,
+    onTransformChange,
 }: CanvasRendererProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const pixiAppRef = useRef<PIXI.Application | null>(null);
@@ -152,7 +156,23 @@ export function CanvasRenderer({
         };
     }, [applyTransform]);
 
-    // Draw the Armature when data changes or app becomes ready
+    // Store references to rendering elements
+    const renderingRef = useRef({
+        spriteLayer: null as PIXI.Container | null,
+        boneLayer: null as PIXI.Container | null,
+        boneGraphics: null as PIXI.Graphics | null,
+        outlineLayer: null as PIXI.Container | null,
+        slotSprites: new Map<string, PIXI.Sprite>(),
+        boneJoints: new Map<string, PIXI.Graphics>(),
+        armature: null as any,
+        skinSlotMap: {} as Record<string, any>,
+        subTextureMap: {} as Record<string, any>,
+        textureBlobUrl: null as string | null,
+        imageSource: null as PIXI.ImageSource | null,
+        alphaCtx: null as CanvasRenderingContext2D | null,
+    });
+
+    // Initialize scene when app is ready or project data changes
     useEffect(() => {
         if (!isAppReady) return;
         const app = pixiAppRef.current;
@@ -205,8 +225,145 @@ export function CanvasRenderer({
         const boneGraphics = new PIXI.Graphics();
         boneLayer.addChild(boneGraphics);
 
+        // Selection outline layer (on top of sprites, below bones)
+        const outlineLayer = new PIXI.Container();
+        rootContainer.addChild(outlineLayer);
+        // Re-add boneLayer on top
+        rootContainer.removeChild(boneLayer);
+        rootContainer.addChild(boneLayer);
+
+        // Build lookup: slotName -> SkinSlotData (from first skin)
+        const skinSlotMap: Record<string, any> = {};
+        if (armature.skins && armature.skins[0]) {
+            for (const skinSlot of armature.skins[0].slots) {
+                skinSlotMap[skinSlot.name] = skinSlot;
+            }
+        }
+
+        // Build texture atlas SubTexture lookup
+        const subTextureMap: Record<string, any> = {};
+        if (projectData.textureAtlas && projectData.textureAtlas.SubTexture) {
+            for (const sub of projectData.textureAtlas.SubTexture) {
+                subTextureMap[sub.name] = sub;
+            }
+        }
+
+        // Store references
+        renderingRef.current = {
+            spriteLayer,
+            boneLayer,
+            boneGraphics,
+            outlineLayer,
+            slotSprites: new Map(),
+            boneJoints: new Map(),
+            armature,
+            skinSlotMap,
+            subTextureMap,
+            textureBlobUrl: projectData.images['texture.png'],
+            imageSource: null,
+            alphaCtx: null,
+        };
+
+        // Load the texture image and create sprites
+        const textureBlobUrl = projectData.images['texture.png'];
+        if (textureBlobUrl) {
+            const loadAndRender = async () => {
+                try {
+                    const img = new Image();
+                    img.src = textureBlobUrl;
+                    await img.decode();
+
+                    const imageSource = new PIXI.ImageSource({ resource: img });
+                    renderingRef.current.imageSource = imageSource;
+
+                    // Offscreen canvas for alpha sampling
+                    const alphaCanvas = document.createElement('canvas');
+                    alphaCanvas.width = img.width;
+                    alphaCanvas.height = img.height;
+                    const alphaCtx = alphaCanvas.getContext('2d', { willReadFrequently: true })!;
+                    alphaCtx.drawImage(img, 0, 0);
+                    renderingRef.current.alphaCtx = alphaCtx;
+
+
+
+                    // Create sprites for slots
+                    const slotSprites = new Map<string, PIXI.Sprite>();
+                    for (const slot of armature.slots) {
+                        const skinSlot = skinSlotMap[slot.name];
+                        if (!skinSlot || !skinSlot.displays || skinSlot.displays.length === 0) continue;
+
+                        const display = skinSlot.displays[slot.displayIndex] || skinSlot.displays[0];
+                        if (display.type !== 'image') continue;
+
+                        const subTex = subTextureMap[display.path];
+                        if (!subTex) continue;
+
+                        const frame = new PIXI.Rectangle(subTex.x, subTex.y, subTex.width, subTex.height);
+                        const subTexture = new PIXI.Texture({ source: imageSource, frame });
+
+                        const sprite = new PIXI.Sprite(subTexture);
+                        sprite.anchor.set(0.5, 0.5);
+
+                        // ---- Pixel-perfect hit test via hitArea ----
+                        sprite.eventMode = 'static';
+                        sprite.cursor = 'pointer';
+
+                        // Pre-extract alpha data for this sub-texture
+                        const frameX = Math.floor(subTex.x);
+                        const frameY = Math.floor(subTex.y);
+                        const frameW = Math.floor(subTex.width);
+                        const frameH = Math.floor(subTex.height);
+                        const alphaData = alphaCtx.getImageData(frameX, frameY, frameW, frameH).data;
+                        const halfW = frameW * 0.5;
+                        const halfH = frameH * 0.5;
+
+                        // Custom hitArea that checks pixel alpha
+                        sprite.hitArea = {
+                            contains(x: number, y: number): boolean {
+                                // x, y are in local sprite coords (anchor-centered: 0,0 = center)
+                                const px = Math.floor(x + halfW);
+                                const py = Math.floor(y + halfH);
+                                if (px < 0 || py < 0 || px >= frameW || py >= frameH) return false;
+                                const alphaIndex = (py * frameW + px) * 4 + 3;
+                                return alphaData[alphaIndex] > 20;
+                            }
+                        };
+
+                        sprite.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
+                            if (e.button === 0 && onSelectSlot) {
+                                onSelectSlot(slot.name);
+                                e.stopPropagation(); // 阻止事件冒泡，防止触发舞台的点击事件
+                            }
+                        });
+
+                        spriteLayer.addChild(sprite);
+                        slotSprites.set(slot.name, sprite);
+                    }
+
+                    renderingRef.current.slotSprites = slotSprites;
+
+                    // Update rendering with current animation
+                    updateRendering();
+                } catch (err) {
+                    console.error("Error loading texture for rendering:", err);
+                }
+            };
+
+            loadAndRender();
+        } else {
+            // No texture, just update bone rendering
+            updateRendering();
+        }
+
+    }, [projectData, selectedArmatureIndex, isAppReady, applyTransform, onSelectSlot, onDeselect]);
+
+    // Helper function to update rendering without recreating the entire scene
+    const updateRendering = useCallback(() => {
+        const { boneLayer, boneGraphics, outlineLayer, slotSprites, boneJoints, armature, skinSlotMap, subTextureMap, alphaCtx } = renderingRef.current;
+        if (!armature || !boneGraphics) return;
+
         // Helper to find a bone by name
-        const findBone = (name: string) => armature.bones.find(b => b.name === name);
+        const findBone = (name: string) => armature.bones.find((b: any) => b.name === name);
 
         // Compute global bone transforms (with animation if playing)
         const globalTransforms: Record<string, PIXI.Matrix> = {};
@@ -217,7 +374,7 @@ export function CanvasRenderer({
             ? getAnimatedBoneTransforms(currentAnimation, currentFrame)
             : null;
 
-        const getGlobalMatrix = (bone: BoneData): PIXI.Matrix => {
+        const getGlobalMatrix = (bone: any): PIXI.Matrix => {
             if (globalTransforms[bone.name]) return globalTransforms[bone.name];
 
             const localMatrix = new PIXI.Matrix();
@@ -257,238 +414,448 @@ export function CanvasRenderer({
             return localMatrix;
         };
 
-        // Build lookup: slotName -> SkinSlotData (from first skin)
-        const skinSlotMap: Record<string, any> = {};
-        if (armature.skins && armature.skins[0]) {
-            for (const skinSlot of armature.skins[0].slots) {
-                skinSlotMap[skinSlot.name] = skinSlot;
+        // Clear existing bone graphics and joints
+        boneGraphics.clear();
+        boneJoints.forEach(joint => {
+            if (joint.parent) {
+                joint.parent.removeChild(joint);
             }
+        });
+        boneJoints.clear();
+
+        // Clear existing outlines
+        if (outlineLayer) {
+            outlineLayer.removeChildren();
         }
 
-        // Build texture atlas SubTexture lookup
-        const subTextureMap: Record<string, any> = {};
-        if (projectData.textureAtlas && projectData.textureAtlas.SubTexture) {
-            for (const sub of projectData.textureAtlas.SubTexture) {
-                subTextureMap[sub.name] = sub;
-            }
-        }
+        // Draw edit tool controls if something is selected
+        if (outlineLayer) {
+            if (selectedBone || selectedSlot) {
+                let targetMatrix: PIXI.Matrix | null = null;
 
-        // Store sprite refs for click-to-select
-        const slotSpriteMap: Map<PIXI.Sprite, string> = new Map();
-
-        // Selection outline layer (on top of sprites, below bones)
-        const outlineLayer = new PIXI.Container();
-        rootContainer.addChild(outlineLayer);
-        // Re-add boneLayer on top
-        rootContainer.removeChild(boneLayer);
-        rootContainer.addChild(boneLayer);
-
-        // Helper: generate a thick white contour texture from alpha data
-        function createContourTexture(
-            alphaCtx: CanvasRenderingContext2D,
-            fx: number, fy: number, fw: number, fh: number,
-            thickness: number = 2
-        ): HTMLCanvasElement {
-            const imgData = alphaCtx.getImageData(fx, fy, fw, fh);
-            const src = imgData.data;
-
-            // Build binary alpha mask
-            const mask = new Uint8Array(fw * fh);
-            for (let i = 0; i < fw * fh; i++) {
-                mask[i] = src[i * 4 + 3] > 20 ? 1 : 0;
-            }
-
-            // Find edge pixels with configurable thickness
-            const contourCanvas = document.createElement('canvas');
-            contourCanvas.width = fw;
-            contourCanvas.height = fh;
-            const ctx = contourCanvas.getContext('2d')!;
-            const out = ctx.createImageData(fw, fh);
-
-            for (let y = 0; y < fh; y++) {
-                for (let x = 0; x < fw; x++) {
-                    const idx = y * fw + x;
-                    if (mask[idx] === 0) continue;
-
-                    // Check neighbors within 'thickness' radius
-                    let isEdge = false;
-                    for (let dy = -thickness; dy <= thickness && !isEdge; dy++) {
-                        for (let dx = -thickness; dx <= thickness && !isEdge; dx++) {
-                            if (dx === 0 && dy === 0) continue;
-                            const nx = x + dx;
-                            const ny = y + dy;
-                            if (nx < 0 || ny < 0 || nx >= fw || ny >= fh || mask[ny * fw + nx] === 0) {
-                                isEdge = true;
+                if (selectedBone) {
+                    const bone = armature.bones.find((b: any) => b.name === selectedBone);
+                    if (bone) {
+                        targetMatrix = getGlobalMatrix(bone);
+                    }
+                } else if (selectedSlot) {
+                    const slot = armature.slots.find((s: any) => s.name === selectedSlot);
+                    if (slot) {
+                        const parentBone = findBone(slot.parentBoneName);
+                        if (parentBone) {
+                            // 获取父骨骼的全局矩阵
+                            const boneMatrix = getGlobalMatrix(parentBone);
+                            
+                            // 获取皮肤槽位的显示信息
+                            const skinSlot = skinSlotMap[slot.name];
+                            if (skinSlot && skinSlot.displays && skinSlot.displays.length > 0) {
+                                const display = skinSlot.displays[slot.displayIndex] || skinSlot.displays[0];
+                                if (display.transform) {
+                                    // 创建显示对象的本地矩阵
+                                    const displayMatrix = new PIXI.Matrix();
+                                    const dSkewX = display.transform.skewX * DEG_TO_RAD;
+                                    const dSkewY = display.transform.skewY * DEG_TO_RAD;
+                                    displayMatrix.a = Math.cos(dSkewY) * display.transform.scaleX;
+                                    displayMatrix.b = Math.sin(dSkewY) * display.transform.scaleX;
+                                    displayMatrix.c = -Math.sin(dSkewX) * display.transform.scaleY;
+                                    displayMatrix.d = Math.cos(dSkewX) * display.transform.scaleY;
+                                    displayMatrix.tx = display.transform.x;
+                                    displayMatrix.ty = display.transform.y;
+                                    
+                                    // 计算显示对象的全局矩阵（父骨骼矩阵 + 显示对象本地矩阵）
+                                    displayMatrix.prepend(boneMatrix);
+                                    targetMatrix = displayMatrix;
+                                } else {
+                                    targetMatrix = boneMatrix;
+                                }
+                            } else {
+                                targetMatrix = boneMatrix;
                             }
                         }
                     }
-
-                    if (isEdge) {
-                        const pi = idx * 4;
-                        out.data[pi] = 255;
-                        out.data[pi + 1] = 255;
-                        out.data[pi + 2] = 255;
-                        out.data[pi + 3] = 240;
-                    }
                 }
-            }
 
-            ctx.putImageData(out, 0, 0);
-            return contourCanvas;
-        }
+                if (targetMatrix) {
+                        const zoom = zoomRef.current;
+                        const controlSize = 16 / zoom; // 增大控制点大小
+                        const controlLineLength = 32 / zoom; // 增大箭头长度
+                        const arrowSize = 6 / zoom; // 增大箭头大小
 
-        // Helper: draw dashed rectangle
-        function drawDashedRect(g: PIXI.Graphics, x: number, y: number, w: number, h: number, dashLen: number, gapLen: number) {
-            const sides = [
-                [x, y, x + w, y],
-                [x + w, y, x + w, y + h],
-                [x + w, y + h, x, y + h],
-                [x, y + h, x, y],
-            ];
-            for (const [x1, y1, x2, y2] of sides) {
-                const dx = x2 - x1;
-                const dy = y2 - y1;
-                const len = Math.sqrt(dx * dx + dy * dy);
-                const nx = dx / len;
-                const ny = dy / len;
-                let d = 0;
-                let drawing = true;
-                while (d < len) {
-                    const segLen = Math.min(drawing ? dashLen : gapLen, len - d);
-                    if (drawing) {
-                        g.moveTo(x1 + nx * d, y1 + ny * d);
-                        g.lineTo(x1 + nx * (d + segLen), y1 + ny * (d + segLen));
-                    }
-                    d += segLen;
-                    drawing = !drawing;
-                }
-            }
-        }
+                    // Draw tool controls based on selectedTool
+                    if (selectedTool === 'move') {
+                        // Draw move tool controls (arrows)
+                        const moveControls = new PIXI.Graphics();
 
-        // Load the texture image and render sprites
-        const textureBlobUrl = projectData.images['texture.png'];
-        if (textureBlobUrl) {
-            const loadAndRender = async () => {
-                try {
-                    const img = new Image();
-                    img.src = textureBlobUrl;
-                    await img.decode();
+                        // X axis arrow
+                        moveControls.moveTo(targetMatrix.tx, targetMatrix.ty);
+                        moveControls.lineTo(targetMatrix.tx + controlLineLength, targetMatrix.ty);
+                        moveControls.lineTo(targetMatrix.tx + controlLineLength - arrowSize, targetMatrix.ty - arrowSize);
+                        moveControls.moveTo(targetMatrix.tx + controlLineLength, targetMatrix.ty);
+                        moveControls.lineTo(targetMatrix.tx + controlLineLength - arrowSize, targetMatrix.ty + arrowSize);
 
-                    const imageSource = new PIXI.ImageSource({ resource: img });
+                        // Y axis arrow
+                        moveControls.moveTo(targetMatrix.tx, targetMatrix.ty);
+                        moveControls.lineTo(targetMatrix.tx, targetMatrix.ty + controlLineLength);
+                        moveControls.lineTo(targetMatrix.tx - arrowSize, targetMatrix.ty + controlLineLength - arrowSize);
+                        moveControls.moveTo(targetMatrix.tx, targetMatrix.ty + controlLineLength);
+                        moveControls.lineTo(targetMatrix.tx + arrowSize, targetMatrix.ty + controlLineLength - arrowSize);
 
-                    // Offscreen canvas for alpha sampling
-                    const alphaCanvas = document.createElement('canvas');
-                    alphaCanvas.width = img.width;
-                    alphaCanvas.height = img.height;
-                    const alphaCtx = alphaCanvas.getContext('2d', { willReadFrequently: true })!;
-                    alphaCtx.drawImage(img, 0, 0);
+                        moveControls.stroke({ width: 2 / zoom, color: 0x00ff00, alpha: 1 });
+                        outlineLayer.addChild(moveControls);
 
-                    for (const slot of armature.slots) {
-                        const parentBone = findBone(slot.parentBoneName);
-                        if (!parentBone) continue;
+                        // Draw center point
+                        const centerPoint = new PIXI.Graphics();
+                        centerPoint.circle(targetMatrix.tx, targetMatrix.ty, controlSize);
+                        centerPoint.fill({ color: 0x00ff00, alpha: 1 });
+                        centerPoint.eventMode = 'static';
+                        centerPoint.cursor = 'move';
+                        outlineLayer.addChild(centerPoint);
 
-                        const boneMatrix = getGlobalMatrix(parentBone);
+                        // Add drag functionality to center point (move in both directions)
+                        centerPoint.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
+                            e.stopPropagation();
+                            let lastX = e.clientX;
+                            let lastY = e.clientY;
 
-                        const skinSlot = skinSlotMap[slot.name];
-                        if (!skinSlot || !skinSlot.displays || skinSlot.displays.length === 0) continue;
+                            const handleMouseMove = (moveEvent: MouseEvent) => {
+                                const deltaX = moveEvent.clientX - lastX;
+                                const deltaY = moveEvent.clientY - lastY;
+                                if (onTransformChange) {
+                                    onTransformChange('x', deltaX);
+                                    onTransformChange('y', deltaY);
+                                }
+                                lastX = moveEvent.clientX;
+                                lastY = moveEvent.clientY;
+                            };
 
-                        const display = skinSlot.displays[slot.displayIndex] || skinSlot.displays[0];
-                        if (display.type !== 'image') continue;
+                            const handleMouseUp = () => {
+                                document.removeEventListener('mousemove', handleMouseMove);
+                                document.removeEventListener('mouseup', handleMouseUp);
+                            };
 
-                        const subTex = subTextureMap[display.path];
-                        if (!subTex) continue;
-
-                        const frameX = Math.floor(subTex.x);
-                        const frameY = Math.floor(subTex.y);
-                        const frameW = Math.floor(subTex.width);
-                        const frameH = Math.floor(subTex.height);
-
-                        const frame = new PIXI.Rectangle(subTex.x, subTex.y, subTex.width, subTex.height);
-                        const subTexture = new PIXI.Texture({ source: imageSource, frame });
-
-                        const sprite = new PIXI.Sprite(subTexture);
-                        sprite.anchor.set(0.5, 0.5);
-
-                        const displayTransform = display.transform;
-                        const displayMatrix = new PIXI.Matrix();
-
-                        const dSkewX = displayTransform.skewX * DEG_TO_RAD;
-                        const dSkewY = displayTransform.skewY * DEG_TO_RAD;
-
-                        displayMatrix.a = Math.cos(dSkewY) * displayTransform.scaleX;
-                        displayMatrix.b = Math.sin(dSkewY) * displayTransform.scaleX;
-                        displayMatrix.c = -Math.sin(dSkewX) * displayTransform.scaleY;
-                        displayMatrix.d = Math.cos(dSkewX) * displayTransform.scaleY;
-                        displayMatrix.tx = displayTransform.x;
-                        displayMatrix.ty = displayTransform.y;
-
-                        displayMatrix.prepend(boneMatrix);
-                        sprite.setFromMatrix(displayMatrix);
-
-                        // ---- Pixel-perfect hit test via hitArea ----
-                        // hitArea.contains() receives coords in local sprite space (pre-transformed by PixiJS)
-                        // Transparent pixels return false → event falls through to sprites below
-                        sprite.eventMode = 'static';
-                        sprite.cursor = 'pointer';
-                        slotSpriteMap.set(sprite, slot.name);
-
-                        // Pre-extract alpha data for this sub-texture
-                        const alphaData = alphaCtx.getImageData(frameX, frameY, frameW, frameH).data;
-                        const halfW = frameW * 0.5;
-                        const halfH = frameH * 0.5;
-
-                        // Custom hitArea that checks pixel alpha
-                        sprite.hitArea = {
-                            contains(x: number, y: number): boolean {
-                                // x, y are in local sprite coords (anchor-centered: 0,0 = center)
-                                const px = Math.floor(x + halfW);
-                                const py = Math.floor(y + halfH);
-                                if (px < 0 || py < 0 || px >= frameW || py >= frameH) return false;
-                                const alphaIndex = (py * frameW + px) * 4 + 3;
-                                return alphaData[alphaIndex] > 20;
-                            }
-                        };
-
-                        sprite.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
-                            if (e.button === 0 && onSelectSlot) {
-                                onSelectSlot(slot.name);
-                            }
+                            document.addEventListener('mousemove', handleMouseMove);
+                            document.addEventListener('mouseup', handleMouseUp);
                         });
 
-                        // ---- Selection visuals ----
-                        // Current zoom for zoom-independent line widths
-                        const zoom = zoomRef.current;
+                        // Add interactive controls for move tool
+                        const xArrow = new PIXI.Graphics();
+                        xArrow.moveTo(targetMatrix.tx, targetMatrix.ty);
+                        xArrow.lineTo(targetMatrix.tx + controlLineLength, targetMatrix.ty);
+                        xArrow.lineTo(targetMatrix.tx + controlLineLength - arrowSize, targetMatrix.ty - arrowSize);
+                        xArrow.moveTo(targetMatrix.tx + controlLineLength, targetMatrix.ty);
+                        xArrow.lineTo(targetMatrix.tx + controlLineLength - arrowSize, targetMatrix.ty + arrowSize);
+                        xArrow.stroke({ width: 3 / zoom, color: 0x00ff00, alpha: 1 });
+                        xArrow.eventMode = 'static';
+                        xArrow.cursor = 'ew-resize';
+                        outlineLayer.addChild(xArrow);
 
-                        if (selectedSlot === slot.name) {
-                            // 1. Dashed bounding box (zoom-independent line width)
-                            const dashedBox = new PIXI.Graphics();
-                            drawDashedRect(dashedBox, -frameW / 2, -frameH / 2, frameW, frameH, 6, 4);
-                            dashedBox.stroke({ width: 1 / zoom, color: 0xcccccc, alpha: 0.7 });
-                            dashedBox.setFromMatrix(displayMatrix);
-                            outlineLayer.addChild(dashedBox);
+                        // Add drag functionality to X arrow
+                        xArrow.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
+                            e.stopPropagation();
+                            let lastX = e.clientX;
 
-                            // 2. White contour of non-transparent pixels
-                            const contourCanvas = createContourTexture(alphaCtx, frameX, frameY, frameW, frameH);
-                            const contourSource = new PIXI.ImageSource({ resource: contourCanvas });
-                            const contourTexture = new PIXI.Texture({ source: contourSource });
-                            const contourSprite = new PIXI.Sprite(contourTexture);
-                            contourSprite.anchor.set(0.5, 0.5);
-                            contourSprite.setFromMatrix(displayMatrix);
-                            outlineLayer.addChild(contourSprite);
-                        }
+                            const handleMouseMove = (moveEvent: MouseEvent) => {
+                                const deltaX = moveEvent.clientX - lastX;
+                                if (onTransformChange) {
+                                    onTransformChange('x', deltaX);
+                                }
+                                lastX = moveEvent.clientX;
+                            };
 
-                        spriteLayer.addChild(sprite);
+                            const handleMouseUp = () => {
+                                document.removeEventListener('mousemove', handleMouseMove);
+                                document.removeEventListener('mouseup', handleMouseUp);
+                            };
+
+                            document.addEventListener('mousemove', handleMouseMove);
+                            document.addEventListener('mouseup', handleMouseUp);
+                        });
+
+                        const yArrow = new PIXI.Graphics();
+                        yArrow.moveTo(targetMatrix.tx, targetMatrix.ty);
+                        yArrow.lineTo(targetMatrix.tx, targetMatrix.ty + controlLineLength);
+                        yArrow.lineTo(targetMatrix.tx - arrowSize, targetMatrix.ty + controlLineLength - arrowSize);
+                        yArrow.moveTo(targetMatrix.tx, targetMatrix.ty + controlLineLength);
+                        yArrow.lineTo(targetMatrix.tx + arrowSize, targetMatrix.ty + controlLineLength - arrowSize);
+                        yArrow.stroke({ width: 3 / zoom, color: 0x00ff00, alpha: 1 });
+                        yArrow.eventMode = 'static';
+                        yArrow.cursor = 'ns-resize';
+                        outlineLayer.addChild(yArrow);
+
+                        // Add drag functionality to Y arrow
+                        yArrow.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
+                            e.stopPropagation();
+                            let lastY = e.clientY;
+
+                            const handleMouseMove = (moveEvent: MouseEvent) => {
+                                const deltaY = moveEvent.clientY - lastY;
+                                if (onTransformChange) {
+                                    onTransformChange('y', deltaY);
+                                }
+                                lastY = moveEvent.clientY;
+                            };
+
+                            const handleMouseUp = () => {
+                                document.removeEventListener('mousemove', handleMouseMove);
+                                document.removeEventListener('mouseup', handleMouseUp);
+                            };
+
+                            document.addEventListener('mousemove', handleMouseMove);
+                            document.addEventListener('mouseup', handleMouseUp);
+                        });
+                    } else if (selectedTool === 'scale') {
+                        // Draw scale tool controls
+                        const scaleControls = new PIXI.Graphics();
+
+                        // Scale handles
+                        const handles = [
+                            { x: 1, y: 0 }, // right
+                            { x: -1, y: 0 }, // left
+                            { x: 0, y: 1 }, // bottom
+                            { x: 0, y: -1 }, // top
+                            { x: 1, y: 1 }, // bottom-right
+                            { x: -1, y: 1 }, // bottom-left
+                            { x: 1, y: -1 }, // top-right
+                            { x: -1, y: -1 }, // top-left
+                        ];
+
+                        handles.forEach(handle => {
+                            const handleX = targetMatrix.tx + handle.x * controlLineLength;
+                            const handleY = targetMatrix.ty + handle.y * controlLineLength;
+                            const handleControl = new PIXI.Graphics();
+                            handleControl.circle(handleX, handleY, controlSize);
+                            handleControl.fill({ color: 0x0000ff, alpha: 1 });
+                            handleControl.eventMode = 'static';
+                            handleControl.cursor = 'pointer';
+                            outlineLayer.addChild(handleControl);
+
+                            // Add drag functionality to scale handles
+                            handleControl.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
+                                e.stopPropagation();
+                                let lastX = e.clientX;
+                                let lastY = e.clientY;
+
+                                const handleMouseMove = (moveEvent: MouseEvent) => {
+                                    const deltaX = (moveEvent.clientX - lastX) * 0.01;
+                                    const deltaY = (moveEvent.clientY - lastY) * 0.01;
+                                    if (onTransformChange) {
+                                        // 基于世界坐标方向缩放，直接应用delta值
+                                        if (handle.x !== 0) {
+                                            onTransformChange('scaleX', deltaX * handle.x);
+                                        }
+                                        if (handle.y !== 0) {
+                                            onTransformChange('scaleY', deltaY * handle.y);
+                                        }
+                                    }
+                                    lastX = moveEvent.clientX;
+                                    lastY = moveEvent.clientY;
+                                };
+
+                                const handleMouseUp = () => {
+                                    document.removeEventListener('mousemove', handleMouseMove);
+                                    document.removeEventListener('mouseup', handleMouseUp);
+                                };
+
+                                document.addEventListener('mousemove', handleMouseMove);
+                                document.addEventListener('mouseup', handleMouseUp);
+                            });
+                        });
+                    } else if (selectedTool === 'rotate') {
+                        // Draw rotate tool controls
+                        const rotateControls = new PIXI.Graphics();
+
+                        // Rotate handle
+                        const rotateRadius = controlLineLength * 2;
+                        const handleX = targetMatrix.tx + Math.cos(Math.PI / 4) * rotateRadius;
+                        const handleY = targetMatrix.ty + Math.sin(Math.PI / 4) * rotateRadius;
+
+                        // Draw rotation arc
+                        rotateControls.arc(targetMatrix.tx, targetMatrix.ty, rotateRadius / 2, 0, Math.PI / 4);
+                        rotateControls.stroke({ width: 2 / zoom, color: 0xff0000, alpha: 1 });
+
+                        // Draw rotate handle
+                        const rotateHandle = new PIXI.Graphics();
+                        rotateHandle.circle(handleX, handleY, controlSize);
+                        rotateHandle.fill({ color: 0xff0000, alpha: 1 });
+                        rotateHandle.eventMode = 'static';
+                        rotateHandle.cursor = 'grabbing';
+                        outlineLayer.addChild(rotateHandle);
+
+                        // Add drag functionality to rotate handle
+                        rotateHandle.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
+                            e.stopPropagation();
+                            let lastX = e.clientX;
+                            let lastY = e.clientY;
+                            const centerX = targetMatrix.tx;
+                            const centerY = targetMatrix.ty;
+                            let lastAngle = Math.atan2(lastY - centerY, lastX - centerX);
+
+                            const handleMouseMove = (moveEvent: MouseEvent) => {
+                                // 计算当前鼠标位置与中心点的夹角
+                                const currentAngle = Math.atan2(moveEvent.clientY - centerY, moveEvent.clientX - centerX);
+                                // 计算角度差
+                                let deltaAngle = (currentAngle - lastAngle) * (180 / Math.PI);
+                                // 确保角度差在合理范围内
+                                if (deltaAngle > 180) deltaAngle -= 360;
+                                if (deltaAngle < -180) deltaAngle += 360;
+                                if (onTransformChange) {
+                                    onTransformChange('skewX', deltaAngle);
+                                }
+                                lastX = moveEvent.clientX;
+                                lastY = moveEvent.clientY;
+                                lastAngle = currentAngle;
+                            };
+
+                            const handleMouseUp = () => {
+                                document.removeEventListener('mousemove', handleMouseMove);
+                                document.removeEventListener('mouseup', handleMouseUp);
+                            };
+
+                            document.addEventListener('mousemove', handleMouseMove);
+                            document.addEventListener('mouseup', handleMouseUp);
+                        });
+
+                        // Draw rotation arc
+                        const arc = new PIXI.Graphics();
+                        arc.arc(targetMatrix.tx, targetMatrix.ty, rotateRadius / 2, 0, Math.PI / 4);
+                        arc.stroke({ width: 3 / zoom, color: 0xff0000, alpha: 1 });
+                        outlineLayer.addChild(arc);
                     }
-                } catch (err) {
-                    console.error("Error loading texture for rendering:", err);
                 }
-            };
-
-            loadAndRender();
+            }
         }
 
+        // Update sprites
+        slotSprites.forEach((sprite, slotName) => {
+            const slot = armature.slots.find((s: any) => s.name === slotName);
+            if (!slot) return;
+
+            const parentBone = findBone(slot.parentBoneName);
+            if (!parentBone) return;
+
+            const boneMatrix = getGlobalMatrix(parentBone);
+            const skinSlot = skinSlotMap[slot.name];
+            if (!skinSlot || !skinSlot.displays || skinSlot.displays.length === 0) return;
+
+            const display = skinSlot.displays[slot.displayIndex] || skinSlot.displays[0];
+            if (display.type !== 'image') return;
+
+            const displayTransform = display.transform;
+            const displayMatrix = new PIXI.Matrix();
+
+            const dSkewX = displayTransform.skewX * DEG_TO_RAD;
+            const dSkewY = displayTransform.skewY * DEG_TO_RAD;
+
+            displayMatrix.a = Math.cos(dSkewY) * displayTransform.scaleX;
+            displayMatrix.b = Math.sin(dSkewY) * displayTransform.scaleX;
+            displayMatrix.c = -Math.sin(dSkewX) * displayTransform.scaleY;
+            displayMatrix.d = Math.cos(dSkewX) * displayTransform.scaleY;
+            displayMatrix.tx = displayTransform.x;
+            displayMatrix.ty = displayTransform.y;
+
+            displayMatrix.prepend(boneMatrix);
+            sprite.setFromMatrix(displayMatrix);
+
+            // Update selection visuals
+            if (selectedSlot === slotName && outlineLayer && alphaCtx) {
+                const subTex = subTextureMap[display.path];
+                if (subTex) {
+                    const frameW = Math.floor(subTex.width);
+                    const frameH = Math.floor(subTex.height);
+                    const frameX = Math.floor(subTex.x);
+                    const frameY = Math.floor(subTex.y);
+
+                    // Current zoom for zoom-independent line widths
+                    const zoom = zoomRef.current;
+
+                    // 1. Dashed bounding box (zoom-independent line width)
+                    const dashedBox = new PIXI.Graphics();
+                    const sides = [
+                        [-frameW / 2, -frameH / 2, frameW / 2, -frameH / 2],
+                        [frameW / 2, -frameH / 2, frameW / 2, frameH / 2],
+                        [frameW / 2, frameH / 2, -frameW / 2, frameH / 2],
+                        [-frameW / 2, frameH / 2, -frameW / 2, -frameH / 2],
+                    ];
+                    for (const [x1, y1, x2, y2] of sides) {
+                        const dx = x2 - x1;
+                        const dy = y2 - y1;
+                        const len = Math.sqrt(dx * dx + dy * dy);
+                        const nx = dx / len;
+                        const ny = dy / len;
+                        let d = 0;
+                        let drawing = true;
+                        while (d < len) {
+                            const segLen = Math.min(drawing ? 6 : 4, len - d);
+                            if (drawing) {
+                                dashedBox.moveTo(x1 + nx * d, y1 + ny * d);
+                                dashedBox.lineTo(x1 + nx * (d + segLen), y1 + ny * (d + segLen));
+                            }
+                            d += segLen;
+                            drawing = !drawing;
+                        }
+                    }
+                    dashedBox.stroke({ width: 1 / zoom, color: 0xcccccc, alpha: 0.7 });
+                    dashedBox.setFromMatrix(displayMatrix);
+                    outlineLayer.addChild(dashedBox);
+
+                    // 2. White contour of non-transparent pixels
+                    const imgData = alphaCtx.getImageData(frameX, frameY, frameW, frameH);
+                    const src = imgData.data;
+
+                    // Build binary alpha mask
+                    const mask = new Uint8Array(frameW * frameH);
+                    for (let i = 0; i < frameW * frameH; i++) {
+                        mask[i] = src[i * 4 + 3] > 20 ? 1 : 0;
+                    }
+
+                    // Find edge pixels
+                    const contourCanvas = document.createElement('canvas');
+                    contourCanvas.width = frameW;
+                    contourCanvas.height = frameH;
+                    const ctx = contourCanvas.getContext('2d')!;
+                    const out = ctx.createImageData(frameW, frameH);
+
+                    for (let y = 0; y < frameH; y++) {
+                        for (let x = 0; x < frameW; x++) {
+                            const idx = y * frameW + x;
+                            if (mask[idx] === 0) continue;
+
+                            // Check neighbors
+                            let isEdge = false;
+                            for (let dy = -2; dy <= 2 && !isEdge; dy++) {
+                                for (let dx = -2; dx <= 2 && !isEdge; dx++) {
+                                    if (dx === 0 && dy === 0) continue;
+                                    const nx = x + dx;
+                                    const ny = y + dy;
+                                    if (nx < 0 || ny < 0 || nx >= frameW || ny >= frameH || mask[ny * frameW + nx] === 0) {
+                                        isEdge = true;
+                                    }
+                                }
+                            }
+
+                            if (isEdge) {
+                                const pi = idx * 4;
+                                out.data[pi] = 255;
+                                out.data[pi + 1] = 255;
+                                out.data[pi + 2] = 255;
+                                out.data[pi + 3] = 240;
+                            }
+                        }
+                    }
+
+                    ctx.putImageData(out, 0, 0);
+                    const contourSource = new PIXI.ImageSource({ resource: contourCanvas });
+                    const contourTexture = new PIXI.Texture({ source: contourSource });
+                    const contourSprite = new PIXI.Sprite(contourTexture);
+                    contourSprite.anchor.set(0.5, 0.5);
+                    contourSprite.setFromMatrix(displayMatrix);
+                    outlineLayer.addChild(contourSprite);
+                }
+            }
+        });
+
         // Draw bone wireframes with click-to-select on joints
-        armature.bones.forEach(bone => {
+        armature.bones.forEach((bone: any) => {
             const matrix = getGlobalMatrix(bone);
             const startX = matrix.tx;
             const startY = matrix.ty;
@@ -522,10 +889,36 @@ export function CanvasRenderer({
                     e.stopPropagation();
                 }
             });
-            boneLayer.addChild(joint);
+            if (boneLayer) {
+                boneLayer.addChild(joint);
+                boneJoints.set(bone.name, joint);
+            }
         });
+    }, [currentAnimation, currentFrame, selectedBone, selectedSlot, onSelectBone]);
 
-    }, [projectData, selectedArmatureIndex, isAppReady, selectedBone, selectedSlot, applyTransform, onSelectBone, onSelectSlot, onDeselect, currentAnimation, currentFrame]);
+    // 节流函数，限制函数调用频率
+    const throttle = (func: Function, limit: number) => {
+        let inThrottle: boolean;
+        return function(this: any, ...args: any[]) {
+            if (!inThrottle) {
+                func.apply(this, args);
+                inThrottle = true;
+                setTimeout(() => inThrottle = false, limit);
+            }
+        };
+    };
+
+    // 节流处理的更新渲染函数
+    const throttledUpdateRendering = useCallback(throttle(() => {
+        updateRendering();
+    }, 16), [updateRendering]);
+
+    // Update rendering when animation or selection changes
+    useEffect(() => {
+        // 使用节流和requestAnimationFrame来批量处理渲染更新，减少闪烁
+        const rafId = requestAnimationFrame(throttledUpdateRendering);
+        return () => cancelAnimationFrame(rafId);
+    }, [currentAnimation, currentFrame, selectedBone, selectedSlot, onSelectBone, throttledUpdateRendering]);
 
     return (
         <div 
