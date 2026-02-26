@@ -2,31 +2,72 @@
 
 ## 2026-02-26
 
+### v0.8.3 — 编辑工具拖动交互全面重构（消除闪烁 + 坐标系修正）
+
+- **修复（闪烁）** `CanvasRenderer.tsx`：
+    - 拖动期间改为**直接修改 `renderingRef.current.armature` 的 transform 数据并调用 `updateRendering()`**，完全绕过 React 状态更新
+    - 松开鼠标时通过 `onTransformChange('commit', 0)` 哨兵信号，一次性 `setProjectData` 同步状态，PropertiesPanel 刷新
+    - 去掉了拖动 useEffect 中对 `projectData` 的依赖，拖动过程中不再触发任何 React 重渲染
+- **修复（X/Y 轴互换）** `ToolRenderer.ts`：
+    - Y 轴箭头改回**朝下**（与 DragonBones + PIXI 的 Y-down 坐标系一致）
+    - 移除错误的 `-dy` 取反；现在水平鼠标移动 → X 字段，垂直鼠标移动 → Y 字段
+- **修复（旋转只改 skewY）** `App.tsx` + `ToolRenderer.ts`：
+    - 旋转控制点只发出一次 `onTransformChange("rotation", delta)`，不再分别发 skewX 和 skewY
+    - `App.tsx` 对 `rotation` 字段同步修改 skewX 和 skewY，确保纯旋转无 skew 畸变
+    - 修复 `commit` 哨兵字段处理
+- **新增** `ToolRenderer.ts`：为所有 draw 方法添加 `onDragEnd?` 参数，拖动结束时回调
+- **新增** `CanvasRenderer.tsx`：`handleToolDragEnd` callback，松手后一次性提交
+
+### v0.8.2 — 编辑工具事件系统重构（按住拖动 + 坐标系统一）
+
+- **修复（点击切换 vs 按住拖动）** `ToolRenderer.ts`：
+    - 将所有控制点从 `document.addEventListener('mousemove')` 改为 **PIXI stage 的 `pointermove/pointerup/pointerupoutside` 事件**
+    - 坐标统一使用 `e.global.x/y`（canvas pixel 坐标），消除与 `moveEvent.clientX`（视口坐标）的混用
+    - 添加 `addDragHandler` 通用工具函数
+- **修复（旋转 360°）** `ToolRenderer.ts`：
+    - 使用 `atan2` 向量角度计算旋转增量，处理 ±π 边界跳变
+    - 骨骼中心点通过 `outlineLayer.parent.toGlobal()` 转换为 canvas 像素坐标
+- **新增** `CanvasRenderer.tsx`：`handleToolTransformChange` wrapper，将 canvas 像素增量除以 zoom 后传给 App.tsx
+- **新增** `CanvasRenderer.tsx`：确保 stage `eventMode='static'` + 注册空 pointermove 保证事件传递
+
+### v0.8.1 — 编辑工具实时刷新修复（消除松手才更新问题）
+
+- **修复（绝对值 vs 增量协议不一致）** `ToolRenderer.ts` + `App.tsx`：
+    - `ToolRenderer` 从传绝对值改为传**逐帧增量（delta）**，使用 `lastX/lastY` 追踪上一帧位置
+    - `App.tsx` 的 `handleTransformChange` 用 `+=` 处理增量，协议统一
+- **修复（stale closure）** `App.tsx`：
+    - `handleTransformChange` 不再依赖渲染时生成的 `selectedInfo` 快照
+    - 每次调用时直接从最新 `projectData` 中查找 transform 对象
+- **修复（armature 引用不更新）** `CanvasRenderer.tsx`：
+    - 新增独立 `useEffect` 监听 `projectData` 变化，实时同步 `renderingRef.current.armature`
+    - 移除 `throttle`（会丢弃大部分 mousemove 事件），改为直接 `requestAnimationFrame`
+    - `updateRendering` useCallback 依赖加入 `selectedTool` 和 `onTransformChange`
+
 ### v0.8.0 — 编辑工具系统与交互优化
 
 - **新增** 编辑工具（移动、缩放、旋转）：
-  - `App.tsx`：新增工具选择器（移动、缩放、旋转按钮）
-  - `CanvasRenderer.tsx`：新增工具控制点渲染（移动箭头、缩放手柄、旋转圆弧）
+    - `App.tsx`：新增工具选择器（移动、缩放、旋转按钮）
+    - `CanvasRenderer.tsx`：新增工具控制点渲染（移动箭头、缩放手柄、旋转圆弧）
 - **新增** 编辑/动画模式切换：
-  - `App.tsx`：新增 `mode` 状态（'edit' | 'animation'）
-  - 动画模式→编辑模式：暂停动画 + 重置到初始状态
-  - 编辑模式→动画模式：开始播放动画
+    - `App.tsx`：新增 `mode` 状态（'edit' | 'animation'）
+    - 动画模式→编辑模式：暂停动画 + 重置到初始状态
+    - 编辑模式→动画模式：开始播放动画
 - **新增** 录制按钮和设置关键帧按钮：
-  - `App.tsx`：新增 `isRecording` 状态和录制切换按钮
-  - 新增 `handleSetKeyframe` 函数（待实现）
+    - `App.tsx`：新增 `isRecording` 状态和录制切换按钮
+    - 新增 `handleSetKeyframe` 函数（待实现）
 - **修改** `CanvasRenderer.tsx`：
-  - 增大工具可视化编辑的控制点和箭头大小（16px控制点，32px箭头长度）
-  - 为可视化编辑的控制点和箭头添加点击和拖动功能
-  - 优化渲染逻辑，使用 `requestAnimationFrame` 和节流函数减少闪烁
+    - 增大工具可视化编辑的控制点和箭头大小（16px控制点，32px箭头长度）
+    - 为可视化编辑的控制点和箭头添加点击和拖动功能
+    - 优化渲染逻辑，使用 `requestAnimationFrame` 和节流函数减少闪烁
 - **修改** `App.tsx`：
-  - 修复旋转功能，确保同时更新 `skewX` 和 `skewY`，避免出现 Skew X 的感觉
-  - 调整 Transform 布局，数字部分可以左右拖动快速修改
-  - 修改 `handleTransformChange` 函数，使用增量更新而不是直接赋值
+    - 修复旋转功能，确保同时更新 `skewX` 和 `skewY`，避免出现 Skew X 的感觉
+    - 调整 Transform 布局，数字部分可以左右拖动快速修改
+    - 修改 `handleTransformChange` 函数，使用增量更新而不是直接赋值
 - **修复** 拖动操作问题：
-  - 移动工具：每次只应用相对位移而不是总位移
-  - 缩放工具：每次只应用相对位移而不是总位移
-  - 旋转工具：每次只应用相对角度变化而不是总角度
-  - 图片拖动时控制点保持可见，跟随图片移动
+    - 移动工具：每次只应用相对位移而不是总位移
+    - 缩放工具：每次只应用相对位移而不是总位移
+    - 旋转工具：每次只应用相对角度变化而不是总角度
+    - 图片拖动时控制点保持可见，跟随图片移动
 
 ### v0.7.0 — 基础编辑工具与时间线优化
 

@@ -1,11 +1,13 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
-import { Settings, Play, Pause, SkipBack, SkipForward, Circle, Save, Move, ZoomIn, RotateCw } from "lucide-react";
 import "./App.css";
 import { parseDragonBonesProject } from './ProjectParser';
 import type { DragonBonesData, BoneData, SlotData, AnimationData } from './DataModel';
 import { CanvasRenderer } from './components/CanvasRenderer';
 import { SceneTree } from './components/SceneTree';
 import { LayerPanel } from './components/LayerPanel';
+import { TopBar, type ToolType } from './components/TopBar';
+import { TimelinePanel } from './components/TimelinePanel';
+import { PropertiesPanel } from './components/PropertiesPanel';
 
 function App() {
     const [isPlaying, setIsPlaying] = useState(false);
@@ -26,7 +28,7 @@ function App() {
     const [isRecording, setIsRecording] = useState(false);
 
     // Editing tool state
-    const [selectedTool, setSelectedTool] = useState<'move' | 'scale' | 'rotate'>('move');
+    const [selectedTool, setSelectedTool] = useState<ToolType>('move');
 
     // Animation state
     const [selectedAnimIndex, setSelectedAnimIndex] = useState(0);
@@ -191,20 +193,40 @@ function App() {
 
     // selectedInfo is already defined above
 
-    // Handle transform property changes from the properties panel
-    const handleTransformChange = useCallback((field: string, value: number) => {
-        if (!selectedInfo || !projectData) return;
-        // The transform object is a direct reference to the data model
-        if (field === 'skewX') {
-            // When changing rotation, update both skewX and skewY to avoid skew effect
-            (selectedInfo.transform as any).skewX += value;
-            (selectedInfo.transform as any).skewY += value;
-        } else {
-            (selectedInfo.transform as any)[field] += value;
+    // Handle transform property changes
+    // - field='commit': drag ended, just force React to re-sync state (data was mutated directly)
+    // - field='rotation': update both skewX and skewY together for pure rotation
+    // - other fields: apply delta (canvas tools) or absolute value (PropertiesPanel uses absolute)
+    const handleTransformChange = useCallback((field: string, delta: number) => {
+        if (!projectData) return;
+        if (field === 'commit') {
+            // Drag ended: data was already mutated in renderingRef; just force React re-render
+            setProjectData({ ...projectData });
+            return;
         }
-        // Force re-render by shallow-copying projectData
+
+        const arm = projectData.armatures[0];
+        if (!arm) return;
+
+        let transform: any = null;
+        if (selectedBone) {
+            const bone = arm.bones.find((b: BoneData) => b.name === selectedBone);
+            if (bone) transform = bone.localTransform;
+        } else if (selectedSlot) {
+            const skin = arm.skins?.[0];
+            const skinSlot = skin?.slots.find((ss: any) => ss.name === selectedSlot);
+            if (skinSlot?.displays?.[0]) transform = skinSlot.displays[0].transform;
+        }
+        if (!transform) return;
+
+        if (field === 'rotation') {
+            transform.skewX += delta;
+            transform.skewY += delta;
+        } else {
+            transform[field] += delta;
+        }
         setProjectData({ ...projectData });
-    }, [selectedInfo, projectData]);
+    }, [selectedBone, selectedSlot, projectData]);
 
     return (
         <div className="flex flex-col h-screen bg-[#2c2c2c] text-[#e0e0e0] font-sans text-sm">
@@ -217,47 +239,13 @@ function App() {
             />
 
             {/* Menu Bar */}
-            <div className="flex items-center h-8 bg-[#383838] px-2 border-b border-[#1a1a1a]">
-                <div className="flex gap-4">
-                    <div className="relative group">
-                        <span className="cursor-pointer hover:text-white" onClick={handleOpenClick}>File (Open...)</span>
-                    </div>
-                    <span className="cursor-pointer hover:text-white">Edit</span>
-                    <span className="cursor-pointer hover:text-white">View</span>
-                    <span className="cursor-pointer hover:text-white">Help</span>
-                </div>
-                <div className="ml-auto flex items-center gap-2">
-                    <div className="flex items-center gap-1">
-                        <button
-                            onClick={() => setSelectedTool('move')}
-                            className={`p-1 rounded ${selectedTool === 'move' ? 'bg-blue-600 text-white' : 'hover:bg-[#555]'}`}
-                            title="移动工具"
-                        >
-                            <Move size={14} />
-                        </button>
-                        <button
-                            onClick={() => setSelectedTool('scale')}
-                            className={`p-1 rounded ${selectedTool === 'scale' ? 'bg-blue-600 text-white' : 'hover:bg-[#555]'}`}
-                            title="缩放工具"
-                        >
-                            <ZoomIn size={14} />
-                        </button>
-                        <button
-                            onClick={() => setSelectedTool('rotate')}
-                            className={`p-1 rounded ${selectedTool === 'rotate' ? 'bg-blue-600 text-white' : 'hover:bg-[#555]'}`}
-                            title="旋转工具"
-                        >
-                            <RotateCw size={14} />
-                        </button>
-                    </div>
-                    <button
-                        onClick={handleModeChange}
-                        className={`px-3 py-1 text-xs rounded ${mode === 'edit' ? 'bg-blue-600 text-white' : 'bg-gray-600 text-gray-300'} hover:opacity-80 transition-opacity`}
-                    >
-                        {mode === 'edit' ? '编辑模式' : '动画模式'}
-                    </button>
-                </div>
-            </div>
+            <TopBar
+                handleOpenClick={handleOpenClick}
+                selectedTool={selectedTool}
+                setSelectedTool={setSelectedTool}
+                mode={mode}
+                handleModeChange={handleModeChange}
+            />
 
             {/* Main Workspace */}
             <div className="flex flex-1 overflow-hidden">
@@ -348,239 +336,28 @@ function App() {
                     </div>
 
                     {/* Timeline Panel */}
-                    <div className="h-48 bg-[#2a2a2a] border-t border-[#1a1a1a] flex flex-col">
-                        <div className="flex items-center justify-between p-2 bg-[#383838] border-b border-[#222]">
-                            <div className="flex items-center gap-2">
-                                <span className="font-semibold text-xs">Timeline</span>
-                                {animations.length > 0 && (
-                                    <select
-                                        className="bg-[#222] text-white text-xs border border-[#555] rounded px-1 py-0.5 outline-none"
-                                        value={selectedAnimIndex}
-                                        onChange={(e) => {
-                                            setSelectedAnimIndex(Number(e.target.value));
-                                            setCurrentFrame(0);
-                                            // 保持当前播放状态，不再停止播放
-                                        }}
-                                    >
-                                        {animations.map((anim: AnimationData, i: number) => (
-                                            <option key={i} value={i}>{anim.name} ({anim.duration}f)</option>
-                                        ))}
-                                    </select>
-                                )}
-                            </div>
-                            <div className="flex gap-1 items-center">
-                                <button
-                                    onClick={() => { setCurrentFrame(0); setIsPlaying(false); }}
-                                    className="p-1 hover:bg-[#555] rounded" title="Reset"
-                                >
-                                    <SkipBack size={14} />
-                                </button>
-                                <button
-                                    onClick={() => setIsPlaying(!isPlaying)}
-                                    className="p-1 hover:bg-[#555] rounded" title={isPlaying ? 'Pause' : 'Play'}
-                                    disabled={!currentAnimation || currentAnimation.duration <= 0}
-                                >
-                                    {isPlaying ? <Pause size={14} /> : <Play size={14} />}
-                                </button>
-                                <button
-                                    onClick={() => {
-                                        if (currentAnimation) {
-                                            setCurrentFrame(Math.min(currentFrame + 1, currentAnimation.duration - 1));
-                                        }
-                                    }}
-                                    className="p-1 hover:bg-[#555] rounded" title="Step Forward"
-                                >
-                                    <SkipForward size={14} />
-                                </button>
-                                <button
-                                    onClick={handleRecordToggle}
-                                    className={`p-1 hover:bg-[#555] rounded ${isRecording ? 'text-red-500' : ''}`} title={isRecording ? '停止录制' : '开始录制'}
-                                >
-                                    <Circle size={14} />
-                                </button>
-                                <button
-                                    onClick={handleSetKeyframe}
-                                    className="p-1 hover:bg-[#555] rounded" title="保存关键帧"
-                                    disabled={!selectedInfo || !currentAnimation}
-                                >
-                                    <Save size={14} />
-                                </button>
-                                <span className="text-[10px] text-gray-400 ml-2">
-                                    {currentFrame} / {currentAnimation?.duration || 0}
-                                </span>
-                            </div>
-                        </div>
-                        <div className="flex-1 flex">
-                            {/* Bone name list */}
-                            <div className="w-48 border-r border-[#1a1a1a] bg-[#333] overflow-y-auto">
-                                {currentAnimation?.bone.map((bt, i) => (
-                                    <div 
-                                        key={i} 
-                                        className="py-1 px-2 border-b border-[#222] text-xs truncate cursor-pointer hover:bg-[#444]"
-                                        onClick={() => handleSelectBone(bt.name)}
-                                    >
-                                        {bt.name}
-                                    </div>
-                                ))}
-                            </div>
-                            {/* Frame grid */}
-                            <div className="flex-1 bg-[#1e1e1e] relative overflow-auto">
-                                {/* Frame number header */}
-                                <div className="h-6 bg-[#2a2a2a] border-b border-[#222] flex items-end relative">
-                                    {currentAnimation && [...Array(Math.max(currentAnimation.duration, 1))].map((_, i) => (
-                                        <div key={i}
-                                            className="border-l border-[#444] h-2 cursor-pointer"
-                                            style={{ width: '12px', minWidth: '12px' }}
-                                            onClick={() => { setCurrentFrame(i); setIsPlaying(false); }}
-                                        >
-                                            {i % 5 === 0 && (
-                                                <span className="absolute -top-4 text-[9px] text-gray-500">{i}</span>
-                                            )}
-                                        </div>
-                                    ))}
-                                    {/* Playhead */}
-                                    {currentAnimation && currentAnimation.duration > 0 && (
-                                        <div
-                                            className="absolute top-0 bottom-0 w-[2px] bg-red-500 pointer-events-none"
-                                            style={{ left: `${currentFrame * 12}px` }}
-                                        />
-                                    )}
-                                </div>
-                                {/* Bone timeline rows */}
-                                {currentAnimation?.bone.map((bt, i) => (
-                                    <div key={i} className="h-7 border-b border-[#222] flex items-center relative">
-                                        {bt.translateFrame.map((_kf, j) => {
-                                            let framePos = 0;
-                                            for (let k = 0; k < j; k++) framePos += bt.translateFrame[k].duration;
-                                            return (
-                                                <div key={`t${j}`}
-                                                    className="w-2 h-2 bg-blue-500 rounded-full transform rotate-45 cursor-pointer hover:bg-white absolute"
-                                                    style={{ left: `${framePos * 12 + 3}px` }}
-                                                    title={`Translate @${framePos}`}
-                                                />
-                                            );
-                                        })}
-                                        {bt.rotateFrame.map((_kf, j) => {
-                                            let framePos = 0;
-                                            for (let k = 0; k < j; k++) framePos += bt.rotateFrame[k].duration;
-                                            return (
-                                                <div key={`r${j}`}
-                                                    className="w-2 h-2 bg-green-500 rounded-full transform rotate-45 cursor-pointer hover:bg-white absolute"
-                                                    style={{ left: `${framePos * 12 + 3}px` }}
-                                                    title={`Rotate @${framePos}`}
-                                                />
-                                            );
-                                        })}
-                                        {/* Playhead line */}
-                                        {currentAnimation && currentAnimation.duration > 0 && (
-                                            <div
-                                                className="absolute top-0 bottom-0 w-[2px] bg-red-500 pointer-events-none opacity-50"
-                                                style={{ left: `${currentFrame * 12}px` }}
-                                            />
-                                        )}
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    </div>
+                    <TimelinePanel
+                        animations={animations as AnimationData[]}
+                        currentAnimation={currentAnimation}
+                        selectedAnimIndex={selectedAnimIndex}
+                        setSelectedAnimIndex={setSelectedAnimIndex}
+                        currentFrame={currentFrame}
+                        setCurrentFrame={setCurrentFrame}
+                        isPlaying={isPlaying}
+                        setIsPlaying={setIsPlaying}
+                        isRecording={isRecording}
+                        handleRecordToggle={handleRecordToggle}
+                        selectedInfo={selectedInfo as any}
+                        handleSetKeyframe={handleSetKeyframe}
+                        handleSelectBone={handleSelectBone}
+                    />
                 </div>
 
                 {/* Right Panel - Properties */}
-                <div className="w-64 bg-[#333333] border-l border-[#1a1a1a] flex flex-col">
-                    <div className="p-2 bg-[#383838] border-b border-[#222] font-semibold flex items-center gap-2 text-xs">
-                        <Settings size={14} /> Properties
-                    </div>
-                    <div className="flex-1 overflow-y-auto p-3 space-y-4">
-                        {selectedInfo ? (
-                            <>
-                                {/* Selected Item Name */}
-                                <div className="text-[11px] text-gray-400">
-                                    {selectedInfo.type === 'bone' ? '🦴 Bone' : '🖼 Slot'}: <span className="text-white font-medium">{selectedInfo.name}</span>
-                                    {selectedInfo.parent && (
-                                        <div className="mt-0.5">Parent: <span className="text-blue-300">{selectedInfo.parent}</span></div>
-                                    )}
-                                </div>
-
-                                {/* Transform Group */}
-                                <div>
-                                    <div className="text-gray-400 mb-2 uppercase text-[10px] font-bold tracking-wider">
-                                        Transform
-                                    </div>
-                                    <div className="space-y-2">
-                                        {[
-                                            { label: 'X', field: 'x' },
-                                            { label: 'Y', field: 'y' },
-                                            { label: 'Rotation', field: 'skewX' },
-                                            { label: 'Scale X', field: 'scaleX', step: 0.1 },
-                                            { label: 'Scale Y', field: 'scaleY', step: 0.1 },
-                                            { label: 'Skew Y', field: 'skewY' },
-                                        ].map(({ label, field, step }) => (
-                                            <div key={field} className="flex items-center gap-2">
-                                                <span className="text-[10px] text-gray-500 w-12">{label}</span>
-                                                <div className="flex-1 relative">
-                                                    <input
-                                                        type="number"
-                                                        step={step || 1}
-                                                        className="w-full bg-[#222] border border-[#444] rounded px-2 py-1 outline-none focus:border-blue-500 text-xs"
-                                                        value={parseFloat((selectedInfo.transform as any)[field].toFixed(2))}
-                                                        onChange={(e) => handleTransformChange(field, parseFloat(e.target.value) || 0)}
-                                                        onMouseDown={(e) => {
-                                                            e.preventDefault();
-                                                            const startX = e.clientX;
-                                                            const startValue = (selectedInfo.transform as any)[field];
-                                                            const stepValue = step || 1;
-
-                                                            const handleMouseMove = (moveEvent: MouseEvent) => {
-                                                                const deltaX = moveEvent.clientX - startX;
-                                                                const newValue = startValue + deltaX * stepValue * 0.1;
-                                                                handleTransformChange(field, newValue);
-                                                            };
-
-                                                            const handleMouseUp = () => {
-                                                                document.removeEventListener('mousemove', handleMouseMove);
-                                                                document.removeEventListener('mouseup', handleMouseUp);
-                                                            };
-
-                                                            document.addEventListener('mousemove', handleMouseMove);
-                                                            document.addEventListener('mouseup', handleMouseUp);
-                                                        }}
-                                                    />
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-
-                                {/* Inheritance (only for bones) */}
-                                {selectedInfo.type === 'bone' && (
-                                    <div>
-                                        <div className="text-gray-400 mb-2 uppercase text-[10px] font-bold tracking-wider">
-                                            Inheritance
-                                        </div>
-                                        <div className="space-y-1.5">
-                                            <label className="flex items-center gap-2 cursor-pointer text-xs">
-                                                <input type="checkbox" defaultChecked className="accent-blue-500" />
-                                                <span>Translation</span>
-                                            </label>
-                                            <label className="flex items-center gap-2 cursor-pointer text-xs">
-                                                <input type="checkbox" defaultChecked className="accent-blue-500" />
-                                                <span>Rotation</span>
-                                            </label>
-                                            <label className="flex items-center gap-2 cursor-pointer text-xs">
-                                                <input type="checkbox" defaultChecked className="accent-blue-500" />
-                                                <span>Scale</span>
-                                            </label>
-                                        </div>
-                                    </div>
-                                )}
-                            </>
-                        ) : (
-                            <div className="text-gray-500 text-xs text-center mt-10">
-                                Select a bone or slot to view properties
-                            </div>
-                        )}
-                    </div>
-                </div>
+                <PropertiesPanel
+                    selectedInfo={selectedInfo as any}
+                    onTransformChange={handleTransformChange}
+                />
             </div>
         </div>
     );

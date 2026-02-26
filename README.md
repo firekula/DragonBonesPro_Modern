@@ -30,11 +30,22 @@ modern-editor/
 │   ├── main.tsx              # React 入口
 │   ├── index.css             # 全局样式
 │   ├── amf3-ts.d.ts          # AMF3 类型声明
+│   ├── hooks/
+│   │   └── usePanZoom.ts     # 画布缩放/平移 Hook
+│   ├── renderer/             # PixiJS 渲染子模块
+│   │   ├── BoneRenderer.ts   # 骨骼线框 + 关节点绘制
+│   │   ├── GridRenderer.ts   # 网格与坐标轴
+│   │   ├── HitTestHelper.ts  # 像素级 alpha hitArea 生成
+│   │   ├── SelectionRenderer.ts # 选中轮廓 + 虚线框
+│   │   └── ToolRenderer.ts   # 编辑工具控制点（移动/缩放/旋转）
 │   └── components/
 │       ├── CanvasRenderer.tsx # PixiJS 画布渲染器（精灵、骨骼、选中、动画）
 │       ├── AnimationPlayer.ts # 动画关键帧插值引擎
+│       ├── PropertiesPanel.tsx # 属性面板
 │       ├── SceneTree.tsx      # 场景树面板（骨骼层级 + 嵌套插槽）
-│       └── LayerPanel.tsx     # 图层面板（Z序排列 + 重排序）
+│       ├── LayerPanel.tsx     # 图层面板（Z序排列 + 重排序）
+│       ├── TimelinePanel.tsx  # 时间轴面板
+│       └── TopBar.tsx         # 顶部工具栏
 ├── test_output.json          # 解析测试输出
 └── package.json
 ```
@@ -56,31 +67,31 @@ modern-editor/
 - **动态网格**：PIXI.Graphics 绘制的网格，跟随缩放/平移
 - **坐标轴**：灰色十字线参考
 
-### 3. 编辑工具系统
+### 3. 编辑工具系统 (ToolRenderer)
 
 - **移动工具**：
-  - 中心点拖拽：自由移动
-  - X/Y 轴箭头拖拽：单向移动
-  - 控制点大小：16px（缩放无关）
-- **缩放工具**：
-  - 8个方向缩放手柄
-  - 世界坐标方向缩放
-  - 控制点大小：16px（缩放无关）
-- **旋转工具**：
-  - 旋转圆弧 + 旋转手柄
-  - 鼠标跟随角度旋转
-  - 控制点大小：16px（缩放无关）
+    - 中心点拖拽：X/Y 双向自由移动
+    - X 轴箭头（→）：仅水平移动，约束 X 轴
+    - Y 轴箭头（↓）：仅垂直移动，约束 Y 轴
+- **缩放工具**：8 个方向缩放手柄（边中点 + 四角）
+- **旋转工具**：角度手柄（`atan2` 向量角度计算，支持完整 360°，处理 ±180° 折返）
+- **实现细节**：
+    - 事件系统：使用 **PIXI stage 的 `pointermove/pointerup`**（非 `document.addEventListener`），坐标统一使用 `e.global.x/y`（canvas pixel 坐标），彻底消除坐标系混用
+    - **无闪烁拖动**：拖动期间直接修改 `renderingRef.current.armature` 数据并调用 `updateRendering()`，完全绕过 React 重渲染；松手后通过哨兵信号一次性 `setProjectData` 同步状态
+    - Zoom 适配：CanvasRenderer 的 wrapper 将 canvas 像素增量除以当前 zoom，得到 DragonBones 世界单位
+    - 控制点大小缩放无关：`controlSize = 16 / zoom`，始终保持 16px 视觉大小
+    - 旋转使用单一 `rotation` 字段，App.tsx 同步修改 `skewX` 和 `skewY`，确保纯旋转无 skew 畸变
 
 ### 4. 模式切换
 
 - **编辑模式**：
-  - 暂停动画播放
-  - 可以编辑骨骼/插槽的 Transform 属性
-  - 可以使用编辑工具进行可视化编辑
+    - 暂停动画播放
+    - 可以编辑骨骼/插槽的 Transform 属性
+    - 可以使用编辑工具进行可视化编辑
 - **动画模式**：
-  - 自动开始播放动画
-  - 支持录制功能（待实现）
-  - 支持设置关键帧（待实现）
+    - 自动开始播放动画
+    - 支持录制功能（待实现）
+    - 支持设置关键帧（待实现）
 
 ### 5. 选中交互
 
@@ -165,5 +176,6 @@ npm run electron:build
 - Vite 默认使用 5173 端口，如端口被占用需先关闭占用进程
 - `.dbproj` 文件通过文件选择对话框加载
 - 动画播放时，关键帧数据为相对于静止姿态的增量值（delta）
-- 编辑工具使用相对位移/角度更新，确保拖动速度稳定
-- 所有工具控制点和箭头大小为 16px（缩放无关）
+- 编辑工具使用逐帧相对位移/角度增量更新，坐标系为 DragonBones 世界坐标（Y 轴向下）
+- 拖动期间直接操作 PIXI 对象（无 React 重渲染），松手后才同步 React 状态，避免闪烁
+- 控制点和箭头大小为视觉 16px（缩放无关，实际值除以 zoom）

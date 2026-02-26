@@ -2,6 +2,12 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import * as PIXI from 'pixi.js';
 import type { DragonBonesData, AnimationData } from '../DataModel';
 import { getAnimatedBoneTransforms, applyAnimationToTransform } from './AnimationPlayer';
+import { usePanZoom } from '../hooks/usePanZoom';
+import { GridRenderer } from '../renderer/GridRenderer';
+import { HitTestHelper } from '../renderer/HitTestHelper';
+import { BoneRenderer } from '../renderer/BoneRenderer';
+import { SelectionRenderer } from '../renderer/SelectionRenderer';
+import { ToolRenderer } from '../renderer/ToolRenderer';
 
 interface CanvasRendererProps {
     projectData: DragonBonesData | null;
@@ -35,22 +41,22 @@ export function CanvasRenderer({
     const rootContainerRef = useRef<PIXI.Container | null>(null);
     const [isAppReady, setIsAppReady] = useState(false);
 
-    // Pan/zoom state stored in refs to avoid re-renders
-    const panRef = useRef({ x: 0, y: 0 });
-    const zoomRef = useRef(1);
-    const isDraggingRef = useRef(false);
-    const lastMouseRef = useRef({ x: 0, y: 0 });
-
     // Apply pan/zoom to root container
-    const applyTransform = useCallback(() => {
+    const applyTransformRaw = useCallback((pan: {x: number, y: number}, zoom: number) => {
         const root = rootContainerRef.current;
         const app = pixiAppRef.current;
         if (!root || !app) return;
 
-        root.x = app.screen.width / 2 + panRef.current.x;
-        root.y = app.screen.height / 2 + panRef.current.y;
-        root.scale.set(zoomRef.current);
+        root.x = app.screen.width / 2 + pan.x;
+        root.y = app.screen.height / 2 + pan.y;
+        root.scale.set(zoom);
     }, []);
+
+    const { panRef, zoomRef } = usePanZoom({ containerRef, onTransform: applyTransformRaw });
+
+    const applyTransform = useCallback(() => {
+        applyTransformRaw(panRef.current, zoomRef.current);
+    }, [applyTransformRaw, panRef, zoomRef]);
 
     // PixiJS init
     useEffect(() => {
@@ -96,65 +102,7 @@ export function CanvasRenderer({
         };
     }, [applyTransform]);
 
-    // Mouse event handlers for pan/zoom
-    useEffect(() => {
-        const container = containerRef.current;
-        if (!container) return;
-
-        // Zoom with scroll wheel
-        const handleWheel = (e: WheelEvent) => {
-            e.preventDefault();
-            const zoomSpeed = 0.1;
-            const delta = e.deltaY > 0 ? -zoomSpeed : zoomSpeed;
-            zoomRef.current = Math.max(0.1, Math.min(5, zoomRef.current + delta * zoomRef.current));
-            applyTransform();
-        };
-
-        // Pan with middle-click or right-click drag
-        const handleMouseDown = (e: MouseEvent) => {
-            if (e.button === 1 || e.button === 2) { // Middle or Right click
-                isDraggingRef.current = true;
-                lastMouseRef.current = { x: e.clientX, y: e.clientY };
-                e.preventDefault();
-            }
-        };
-
-        const handleMouseMove = (e: MouseEvent) => {
-            if (isDraggingRef.current) {
-                const dx = e.clientX - lastMouseRef.current.x;
-                const dy = e.clientY - lastMouseRef.current.y;
-                panRef.current.x += dx;
-                panRef.current.y += dy;
-                lastMouseRef.current = { x: e.clientX, y: e.clientY };
-                applyTransform();
-            }
-        };
-
-        const handleMouseUp = (e: MouseEvent) => {
-            if (e.button === 1 || e.button === 2) {
-                isDraggingRef.current = false;
-            }
-        };
-
-        // Prevent context menu on right-click
-        const handleContextMenu = (e: MouseEvent) => {
-            e.preventDefault();
-        };
-
-        container.addEventListener('wheel', handleWheel, { passive: false });
-        container.addEventListener('mousedown', handleMouseDown);
-        window.addEventListener('mousemove', handleMouseMove);
-        window.addEventListener('mouseup', handleMouseUp);
-        container.addEventListener('contextmenu', handleContextMenu);
-
-        return () => {
-            container.removeEventListener('wheel', handleWheel);
-            container.removeEventListener('mousedown', handleMouseDown);
-            window.removeEventListener('mousemove', handleMouseMove);
-            window.removeEventListener('mouseup', handleMouseUp);
-            container.removeEventListener('contextmenu', handleContextMenu);
-        };
-    }, [applyTransform]);
+    // Pan zoom logic handled by usePanZoom hook
 
     // Store references to rendering elements
     const renderingRef = useRef({
@@ -171,6 +119,14 @@ export function CanvasRenderer({
         imageSource: null as PIXI.ImageSource | null,
         alphaCtx: null as CanvasRenderingContext2D | null,
     });
+
+    // Keep armature reference in renderingRef in sync whenever projectData changes
+    useEffect(() => {
+        if (!projectData || !projectData.armatures[selectedArmatureIndex]) return;
+        renderingRef.current.armature = projectData.armatures[selectedArmatureIndex];
+    }, [projectData, selectedArmatureIndex]);
+
+    // (applyDeltaDirectly and handleToolDragEnd are defined after updateRendering below)
 
     // Initialize scene when app is ready or project data changes
     useEffect(() => {
@@ -190,6 +146,9 @@ export function CanvasRenderer({
                 onDeselect();
             }
         });
+        // Ensure stage receives pointermove events even when pointer is outside any child
+        // (required by ToolRenderer's drag system which listens on stage.on('pointermove'))
+        stage.on('pointermove', () => {});
 
         // Root container (zoom/pan applied here)
         const rootContainer = new PIXI.Container();
@@ -197,23 +156,7 @@ export function CanvasRenderer({
         stage.addChild(rootContainer);
         applyTransform();
 
-        // Dynamic grid that moves/scales with content
-        const gridGraphics = new PIXI.Graphics();
-        const gridSize = 20;
-        const gridExtent = 5000;
-        for (let i = -gridExtent; i <= gridExtent; i += gridSize) {
-            gridGraphics.moveTo(i, -gridExtent).lineTo(i, gridExtent);
-            gridGraphics.moveTo(-gridExtent, i).lineTo(gridExtent, i);
-        }
-        gridGraphics.stroke({ width: 1, color: 0x333333, alpha: 0.5 });
-        rootContainer.addChild(gridGraphics);
-
-        // Reference axes
-        const axes = new PIXI.Graphics();
-        axes.moveTo(-5000, 0).lineTo(5000, 0);
-        axes.moveTo(0, -5000).lineTo(0, 5000);
-        axes.stroke({ width: 1, color: 0x555555, alpha: 0.8 });
-        rootContainer.addChild(axes);
+        GridRenderer.createGridAndAxes(rootContainer);
 
         // Sprite rendering layer (below bones)
         const spriteLayer = new PIXI.Container();
@@ -308,26 +251,14 @@ export function CanvasRenderer({
                         sprite.eventMode = 'static';
                         sprite.cursor = 'pointer';
 
-                        // Pre-extract alpha data for this sub-texture
                         const frameX = Math.floor(subTex.x);
                         const frameY = Math.floor(subTex.y);
                         const frameW = Math.floor(subTex.width);
                         const frameH = Math.floor(subTex.height);
-                        const alphaData = alphaCtx.getImageData(frameX, frameY, frameW, frameH).data;
-                        const halfW = frameW * 0.5;
-                        const halfH = frameH * 0.5;
 
-                        // Custom hitArea that checks pixel alpha
-                        sprite.hitArea = {
-                            contains(x: number, y: number): boolean {
-                                // x, y are in local sprite coords (anchor-centered: 0,0 = center)
-                                const px = Math.floor(x + halfW);
-                                const py = Math.floor(y + halfH);
-                                if (px < 0 || py < 0 || px >= frameW || py >= frameH) return false;
-                                const alphaIndex = (py * frameW + px) * 4 + 3;
-                                return alphaData[alphaIndex] > 20;
-                            }
-                        };
+                        sprite.hitArea = HitTestHelper.createAlphaHitArea(
+                            alphaCtx, frameX, frameY, frameW, frameH
+                        );
 
                         sprite.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
                             if (e.button === 0 && onSelectSlot) {
@@ -477,249 +408,17 @@ export function CanvasRenderer({
 
                 if (targetMatrix) {
                         const zoom = zoomRef.current;
-                        const controlSize = 16 / zoom; // 增大控制点大小
-                        const controlLineLength = 32 / zoom; // 增大箭头长度
-                        const arrowSize = 6 / zoom; // 增大箭头大小
+                        const controlSize = 16 / zoom;
+                        const controlLineLength = 32 / zoom;
+                        const arrowSize = 6 / zoom;
 
                     // Draw tool controls based on selectedTool
                     if (selectedTool === 'move') {
-                        // Draw move tool controls (arrows)
-                        const moveControls = new PIXI.Graphics();
-
-                        // X axis arrow
-                        moveControls.moveTo(targetMatrix.tx, targetMatrix.ty);
-                        moveControls.lineTo(targetMatrix.tx + controlLineLength, targetMatrix.ty);
-                        moveControls.lineTo(targetMatrix.tx + controlLineLength - arrowSize, targetMatrix.ty - arrowSize);
-                        moveControls.moveTo(targetMatrix.tx + controlLineLength, targetMatrix.ty);
-                        moveControls.lineTo(targetMatrix.tx + controlLineLength - arrowSize, targetMatrix.ty + arrowSize);
-
-                        // Y axis arrow
-                        moveControls.moveTo(targetMatrix.tx, targetMatrix.ty);
-                        moveControls.lineTo(targetMatrix.tx, targetMatrix.ty + controlLineLength);
-                        moveControls.lineTo(targetMatrix.tx - arrowSize, targetMatrix.ty + controlLineLength - arrowSize);
-                        moveControls.moveTo(targetMatrix.tx, targetMatrix.ty + controlLineLength);
-                        moveControls.lineTo(targetMatrix.tx + arrowSize, targetMatrix.ty + controlLineLength - arrowSize);
-
-                        moveControls.stroke({ width: 2 / zoom, color: 0x00ff00, alpha: 1 });
-                        outlineLayer.addChild(moveControls);
-
-                        // Draw center point
-                        const centerPoint = new PIXI.Graphics();
-                        centerPoint.circle(targetMatrix.tx, targetMatrix.ty, controlSize);
-                        centerPoint.fill({ color: 0x00ff00, alpha: 1 });
-                        centerPoint.eventMode = 'static';
-                        centerPoint.cursor = 'move';
-                        outlineLayer.addChild(centerPoint);
-
-                        // Add drag functionality to center point (move in both directions)
-                        centerPoint.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
-                            e.stopPropagation();
-                            let lastX = e.clientX;
-                            let lastY = e.clientY;
-
-                            const handleMouseMove = (moveEvent: MouseEvent) => {
-                                const deltaX = moveEvent.clientX - lastX;
-                                const deltaY = moveEvent.clientY - lastY;
-                                if (onTransformChange) {
-                                    onTransformChange('x', deltaX);
-                                    onTransformChange('y', deltaY);
-                                }
-                                lastX = moveEvent.clientX;
-                                lastY = moveEvent.clientY;
-                            };
-
-                            const handleMouseUp = () => {
-                                document.removeEventListener('mousemove', handleMouseMove);
-                                document.removeEventListener('mouseup', handleMouseUp);
-                            };
-
-                            document.addEventListener('mousemove', handleMouseMove);
-                            document.addEventListener('mouseup', handleMouseUp);
-                        });
-
-                        // Add interactive controls for move tool
-                        const xArrow = new PIXI.Graphics();
-                        xArrow.moveTo(targetMatrix.tx, targetMatrix.ty);
-                        xArrow.lineTo(targetMatrix.tx + controlLineLength, targetMatrix.ty);
-                        xArrow.lineTo(targetMatrix.tx + controlLineLength - arrowSize, targetMatrix.ty - arrowSize);
-                        xArrow.moveTo(targetMatrix.tx + controlLineLength, targetMatrix.ty);
-                        xArrow.lineTo(targetMatrix.tx + controlLineLength - arrowSize, targetMatrix.ty + arrowSize);
-                        xArrow.stroke({ width: 3 / zoom, color: 0x00ff00, alpha: 1 });
-                        xArrow.eventMode = 'static';
-                        xArrow.cursor = 'ew-resize';
-                        outlineLayer.addChild(xArrow);
-
-                        // Add drag functionality to X arrow
-                        xArrow.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
-                            e.stopPropagation();
-                            let lastX = e.clientX;
-
-                            const handleMouseMove = (moveEvent: MouseEvent) => {
-                                const deltaX = moveEvent.clientX - lastX;
-                                if (onTransformChange) {
-                                    onTransformChange('x', deltaX);
-                                }
-                                lastX = moveEvent.clientX;
-                            };
-
-                            const handleMouseUp = () => {
-                                document.removeEventListener('mousemove', handleMouseMove);
-                                document.removeEventListener('mouseup', handleMouseUp);
-                            };
-
-                            document.addEventListener('mousemove', handleMouseMove);
-                            document.addEventListener('mouseup', handleMouseUp);
-                        });
-
-                        const yArrow = new PIXI.Graphics();
-                        yArrow.moveTo(targetMatrix.tx, targetMatrix.ty);
-                        yArrow.lineTo(targetMatrix.tx, targetMatrix.ty + controlLineLength);
-                        yArrow.lineTo(targetMatrix.tx - arrowSize, targetMatrix.ty + controlLineLength - arrowSize);
-                        yArrow.moveTo(targetMatrix.tx, targetMatrix.ty + controlLineLength);
-                        yArrow.lineTo(targetMatrix.tx + arrowSize, targetMatrix.ty + controlLineLength - arrowSize);
-                        yArrow.stroke({ width: 3 / zoom, color: 0x00ff00, alpha: 1 });
-                        yArrow.eventMode = 'static';
-                        yArrow.cursor = 'ns-resize';
-                        outlineLayer.addChild(yArrow);
-
-                        // Add drag functionality to Y arrow
-                        yArrow.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
-                            e.stopPropagation();
-                            let lastY = e.clientY;
-
-                            const handleMouseMove = (moveEvent: MouseEvent) => {
-                                const deltaY = moveEvent.clientY - lastY;
-                                if (onTransformChange) {
-                                    onTransformChange('y', deltaY);
-                                }
-                                lastY = moveEvent.clientY;
-                            };
-
-                            const handleMouseUp = () => {
-                                document.removeEventListener('mousemove', handleMouseMove);
-                                document.removeEventListener('mouseup', handleMouseUp);
-                            };
-
-                            document.addEventListener('mousemove', handleMouseMove);
-                            document.addEventListener('mouseup', handleMouseUp);
-                        });
+                        ToolRenderer.drawMoveControls(outlineLayer, targetMatrix, controlSize, controlLineLength, arrowSize, handleToolTransformChange, handleToolDragEnd);
                     } else if (selectedTool === 'scale') {
-                        // Draw scale tool controls
-                        const scaleControls = new PIXI.Graphics();
-
-                        // Scale handles
-                        const handles = [
-                            { x: 1, y: 0 }, // right
-                            { x: -1, y: 0 }, // left
-                            { x: 0, y: 1 }, // bottom
-                            { x: 0, y: -1 }, // top
-                            { x: 1, y: 1 }, // bottom-right
-                            { x: -1, y: 1 }, // bottom-left
-                            { x: 1, y: -1 }, // top-right
-                            { x: -1, y: -1 }, // top-left
-                        ];
-
-                        handles.forEach(handle => {
-                            const handleX = targetMatrix.tx + handle.x * controlLineLength;
-                            const handleY = targetMatrix.ty + handle.y * controlLineLength;
-                            const handleControl = new PIXI.Graphics();
-                            handleControl.circle(handleX, handleY, controlSize);
-                            handleControl.fill({ color: 0x0000ff, alpha: 1 });
-                            handleControl.eventMode = 'static';
-                            handleControl.cursor = 'pointer';
-                            outlineLayer.addChild(handleControl);
-
-                            // Add drag functionality to scale handles
-                            handleControl.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
-                                e.stopPropagation();
-                                let lastX = e.clientX;
-                                let lastY = e.clientY;
-
-                                const handleMouseMove = (moveEvent: MouseEvent) => {
-                                    const deltaX = (moveEvent.clientX - lastX) * 0.01;
-                                    const deltaY = (moveEvent.clientY - lastY) * 0.01;
-                                    if (onTransformChange) {
-                                        // 基于世界坐标方向缩放，直接应用delta值
-                                        if (handle.x !== 0) {
-                                            onTransformChange('scaleX', deltaX * handle.x);
-                                        }
-                                        if (handle.y !== 0) {
-                                            onTransformChange('scaleY', deltaY * handle.y);
-                                        }
-                                    }
-                                    lastX = moveEvent.clientX;
-                                    lastY = moveEvent.clientY;
-                                };
-
-                                const handleMouseUp = () => {
-                                    document.removeEventListener('mousemove', handleMouseMove);
-                                    document.removeEventListener('mouseup', handleMouseUp);
-                                };
-
-                                document.addEventListener('mousemove', handleMouseMove);
-                                document.addEventListener('mouseup', handleMouseUp);
-                            });
-                        });
+                        ToolRenderer.drawScaleControls(outlineLayer, targetMatrix, controlSize, controlLineLength, handleToolTransformChange, handleToolDragEnd);
                     } else if (selectedTool === 'rotate') {
-                        // Draw rotate tool controls
-                        const rotateControls = new PIXI.Graphics();
-
-                        // Rotate handle
-                        const rotateRadius = controlLineLength * 2;
-                        const handleX = targetMatrix.tx + Math.cos(Math.PI / 4) * rotateRadius;
-                        const handleY = targetMatrix.ty + Math.sin(Math.PI / 4) * rotateRadius;
-
-                        // Draw rotation arc
-                        rotateControls.arc(targetMatrix.tx, targetMatrix.ty, rotateRadius / 2, 0, Math.PI / 4);
-                        rotateControls.stroke({ width: 2 / zoom, color: 0xff0000, alpha: 1 });
-
-                        // Draw rotate handle
-                        const rotateHandle = new PIXI.Graphics();
-                        rotateHandle.circle(handleX, handleY, controlSize);
-                        rotateHandle.fill({ color: 0xff0000, alpha: 1 });
-                        rotateHandle.eventMode = 'static';
-                        rotateHandle.cursor = 'grabbing';
-                        outlineLayer.addChild(rotateHandle);
-
-                        // Add drag functionality to rotate handle
-                        rotateHandle.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
-                            e.stopPropagation();
-                            let lastX = e.clientX;
-                            let lastY = e.clientY;
-                            const centerX = targetMatrix.tx;
-                            const centerY = targetMatrix.ty;
-                            let lastAngle = Math.atan2(lastY - centerY, lastX - centerX);
-
-                            const handleMouseMove = (moveEvent: MouseEvent) => {
-                                // 计算当前鼠标位置与中心点的夹角
-                                const currentAngle = Math.atan2(moveEvent.clientY - centerY, moveEvent.clientX - centerX);
-                                // 计算角度差
-                                let deltaAngle = (currentAngle - lastAngle) * (180 / Math.PI);
-                                // 确保角度差在合理范围内
-                                if (deltaAngle > 180) deltaAngle -= 360;
-                                if (deltaAngle < -180) deltaAngle += 360;
-                                if (onTransformChange) {
-                                    onTransformChange('skewX', deltaAngle);
-                                }
-                                lastX = moveEvent.clientX;
-                                lastY = moveEvent.clientY;
-                                lastAngle = currentAngle;
-                            };
-
-                            const handleMouseUp = () => {
-                                document.removeEventListener('mousemove', handleMouseMove);
-                                document.removeEventListener('mouseup', handleMouseUp);
-                            };
-
-                            document.addEventListener('mousemove', handleMouseMove);
-                            document.addEventListener('mouseup', handleMouseUp);
-                        });
-
-                        // Draw rotation arc
-                        const arc = new PIXI.Graphics();
-                        arc.arc(targetMatrix.tx, targetMatrix.ty, rotateRadius / 2, 0, Math.PI / 4);
-                        arc.stroke({ width: 3 / zoom, color: 0xff0000, alpha: 1 });
-                        outlineLayer.addChild(arc);
+                        ToolRenderer.drawRotateControls(outlineLayer, targetMatrix, controlSize, controlLineLength, handleToolTransformChange, handleToolDragEnd);
                     }
                 }
             }
@@ -757,168 +456,78 @@ export function CanvasRenderer({
             sprite.setFromMatrix(displayMatrix);
 
             // Update selection visuals
-            if (selectedSlot === slotName && outlineLayer && alphaCtx) {
+            if (selectedSlot === slot.name && outlineLayer && alphaCtx) {
                 const subTex = subTextureMap[display.path];
                 if (subTex) {
-                    const frameW = Math.floor(subTex.width);
-                    const frameH = Math.floor(subTex.height);
-                    const frameX = Math.floor(subTex.x);
-                    const frameY = Math.floor(subTex.y);
-
-                    // Current zoom for zoom-independent line widths
-                    const zoom = zoomRef.current;
-
-                    // 1. Dashed bounding box (zoom-independent line width)
-                    const dashedBox = new PIXI.Graphics();
-                    const sides = [
-                        [-frameW / 2, -frameH / 2, frameW / 2, -frameH / 2],
-                        [frameW / 2, -frameH / 2, frameW / 2, frameH / 2],
-                        [frameW / 2, frameH / 2, -frameW / 2, frameH / 2],
-                        [-frameW / 2, frameH / 2, -frameW / 2, -frameH / 2],
-                    ];
-                    for (const [x1, y1, x2, y2] of sides) {
-                        const dx = x2 - x1;
-                        const dy = y2 - y1;
-                        const len = Math.sqrt(dx * dx + dy * dy);
-                        const nx = dx / len;
-                        const ny = dy / len;
-                        let d = 0;
-                        let drawing = true;
-                        while (d < len) {
-                            const segLen = Math.min(drawing ? 6 : 4, len - d);
-                            if (drawing) {
-                                dashedBox.moveTo(x1 + nx * d, y1 + ny * d);
-                                dashedBox.lineTo(x1 + nx * (d + segLen), y1 + ny * (d + segLen));
-                            }
-                            d += segLen;
-                            drawing = !drawing;
-                        }
-                    }
-                    dashedBox.stroke({ width: 1 / zoom, color: 0xcccccc, alpha: 0.7 });
-                    dashedBox.setFromMatrix(displayMatrix);
-                    outlineLayer.addChild(dashedBox);
-
-                    // 2. White contour of non-transparent pixels
-                    const imgData = alphaCtx.getImageData(frameX, frameY, frameW, frameH);
-                    const src = imgData.data;
-
-                    // Build binary alpha mask
-                    const mask = new Uint8Array(frameW * frameH);
-                    for (let i = 0; i < frameW * frameH; i++) {
-                        mask[i] = src[i * 4 + 3] > 20 ? 1 : 0;
-                    }
-
-                    // Find edge pixels
-                    const contourCanvas = document.createElement('canvas');
-                    contourCanvas.width = frameW;
-                    contourCanvas.height = frameH;
-                    const ctx = contourCanvas.getContext('2d')!;
-                    const out = ctx.createImageData(frameW, frameH);
-
-                    for (let y = 0; y < frameH; y++) {
-                        for (let x = 0; x < frameW; x++) {
-                            const idx = y * frameW + x;
-                            if (mask[idx] === 0) continue;
-
-                            // Check neighbors
-                            let isEdge = false;
-                            for (let dy = -2; dy <= 2 && !isEdge; dy++) {
-                                for (let dx = -2; dx <= 2 && !isEdge; dx++) {
-                                    if (dx === 0 && dy === 0) continue;
-                                    const nx = x + dx;
-                                    const ny = y + dy;
-                                    if (nx < 0 || ny < 0 || nx >= frameW || ny >= frameH || mask[ny * frameW + nx] === 0) {
-                                        isEdge = true;
-                                    }
-                                }
-                            }
-
-                            if (isEdge) {
-                                const pi = idx * 4;
-                                out.data[pi] = 255;
-                                out.data[pi + 1] = 255;
-                                out.data[pi + 2] = 255;
-                                out.data[pi + 3] = 240;
-                            }
-                        }
-                    }
-
-                    ctx.putImageData(out, 0, 0);
-                    const contourSource = new PIXI.ImageSource({ resource: contourCanvas });
-                    const contourTexture = new PIXI.Texture({ source: contourSource });
-                    const contourSprite = new PIXI.Sprite(contourTexture);
-                    contourSprite.anchor.set(0.5, 0.5);
-                    contourSprite.setFromMatrix(displayMatrix);
-                    outlineLayer.addChild(contourSprite);
+                    SelectionRenderer.drawSlotSelection(
+                        outlineLayer, alphaCtx, displayMatrix, subTex, zoomRef.current
+                    );
                 }
             }
         });
 
         // Draw bone wireframes with click-to-select on joints
-        armature.bones.forEach((bone: any) => {
-            const matrix = getGlobalMatrix(bone);
-            const startX = matrix.tx;
-            const startY = matrix.ty;
-            const length = Math.max(bone.length, 10);
-            const endX = startX + matrix.a * length;
-            const endY = startY + matrix.b * length;
+        BoneRenderer.drawBones(
+            armature,
+            getGlobalMatrix,
+            boneGraphics,
+            boneLayer,
+            boneJoints,
+            selectedBone,
+            zoomRef.current,
+            onSelectBone
+        );
+    // projectData changes trigger re-render since armature ref is updated above
+    }, [currentAnimation, currentFrame, selectedBone, selectedSlot, selectedTool, onSelectBone, onTransformChange]);
 
-            const isSelected = selectedBone === bone.name;
-            const boneColor = isSelected ? 0xffffff : (bone.color || 0x00ffff);
-            const zoom = zoomRef.current;
-            const boneWidth = (isSelected ? 3 : 2) / zoom;  // Zoom-independent
-            const boneAlpha = isSelected ? 1.0 : 0.8;
+    /**
+     * During drag: apply delta directly to the armature transform and re-render via PIXI
+     * (bypasses React state to prevent flicker caused by re-renders on every mousemove).
+     * On drag end: call onTransformChange('commit', 0) to sync the mutated data to App.tsx.
+     */
+    const applyDeltaDirectly = useCallback((field: string, canvasPixelDelta: number) => {
+        const zoom = zoomRef.current;
+        const worldDelta = field === 'rotation' ? canvasPixelDelta : canvasPixelDelta / zoom;
 
-            boneGraphics.moveTo(startX, startY);
-            boneGraphics.lineTo(endX, endY);
-            boneGraphics.stroke({ width: boneWidth, color: boneColor, alpha: boneAlpha });
+        const arm = renderingRef.current.armature;
+        if (!arm) return;
 
-            const jointSize = (isSelected ? 6 : 4) / zoom;  // Zoom-independent
-            boneGraphics.circle(startX, startY, jointSize);
-            boneGraphics.fill({ color: isSelected ? 0xff4400 : 0xffaa00, alpha: boneAlpha });
+        let transform: any = null;
+        const bone = arm.bones.find((b: any) => b.name === selectedBone);
+        if (bone) {
+            transform = bone.localTransform;
+        } else if (selectedSlot) {
+            const skin = arm.skins?.[0];
+            const skinSlot = skin?.slots.find((ss: any) => ss.name === selectedSlot);
+            if (skinSlot?.displays?.[0]) transform = skinSlot.displays[0].transform;
+        }
+        if (!transform) return;
 
-            // Clickable joint circle for bone selection
-            const joint = new PIXI.Graphics();
-            joint.circle(startX, startY, 8);
-            joint.fill({ color: 0x000000, alpha: 0.01 }); // Nearly invisible hit area
-            joint.eventMode = 'static';
-            joint.cursor = 'pointer';
-            joint.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
-                if (e.button === 0 && onSelectBone) {
-                    onSelectBone(bone.name);
-                    e.stopPropagation();
-                }
-            });
-            if (boneLayer) {
-                boneLayer.addChild(joint);
-                boneJoints.set(bone.name, joint);
-            }
-        });
-    }, [currentAnimation, currentFrame, selectedBone, selectedSlot, onSelectBone]);
-
-    // 节流函数，限制函数调用频率
-    const throttle = (func: Function, limit: number) => {
-        let inThrottle: boolean;
-        return function(this: any, ...args: any[]) {
-            if (!inThrottle) {
-                func.apply(this, args);
-                inThrottle = true;
-                setTimeout(() => inThrottle = false, limit);
-            }
-        };
-    };
-
-    // 节流处理的更新渲染函数
-    const throttledUpdateRendering = useCallback(throttle(() => {
+        if (field === 'rotation') {
+            transform.skewX += worldDelta;
+            transform.skewY += worldDelta;
+        } else {
+            transform[field] += worldDelta;
+        }
+        // Direct PIXI re-render, no React state update = no flicker
         updateRendering();
-    }, 16), [updateRendering]);
+    }, [selectedBone, selectedSlot, zoomRef, updateRendering]);
 
-    // Update rendering when animation or selection changes
+    const handleToolTransformChange = useCallback((field: string, canvasPixelDelta: number) => {
+        applyDeltaDirectly(field, canvasPixelDelta);
+    }, [applyDeltaDirectly]);
+
+    const handleToolDragEnd = useCallback(() => {
+        // One-time commit: signal App.tsx to shallow-copy projectData so PropertiesPanel refreshes
+        if (onTransformChange) onTransformChange('commit', 0);
+    }, [onTransformChange]);
+
+    // Update rendering when animation/selection/tool changes (NOT on every projectData change - drags go through applyDeltaDirectly)
     useEffect(() => {
-        // 使用节流和requestAnimationFrame来批量处理渲染更新，减少闪烁
-        const rafId = requestAnimationFrame(throttledUpdateRendering);
+        const rafId = requestAnimationFrame(() => updateRendering());
         return () => cancelAnimationFrame(rafId);
-    }, [currentAnimation, currentFrame, selectedBone, selectedSlot, onSelectBone, throttledUpdateRendering]);
+    }, [currentAnimation, currentFrame, selectedBone, selectedSlot, selectedTool, onSelectBone, updateRendering]);
+
 
     return (
         <div 
