@@ -95,9 +95,11 @@ function App() {
     /**
      * Pending transform edits in animation mode (stopped, non-recording).
      * Key format: "<type>:<name>" e.g. "bone:root" or "slot:body"
-     * These are discarded when play starts or the frame changes.
+     * Value is a snapshot of the transform BEFORE editing (used to restore on discard).
      */
     const [pendingEdits, setPendingEdits] = useState<Map<string, Record<string, number>>>(new Map());
+    // Ref to hold transform snapshots for restoration
+    const transformSnapshotRef = useRef<Map<string, Record<string, number>>>(new Map());
 
     // Get current armature and animation
     const armature = projectData?.armatures[0];
@@ -198,7 +200,6 @@ function App() {
                 lastTimeRef.current = now - (delta % frameDuration);
                 animFrameRef.current += 1;
 
-                // Loop or stop
                 if (animFrameRef.current >= currentAnimation.duration) {
                     if (currentAnimation.playTimes === 0) {
                         animFrameRef.current = 0;
@@ -211,7 +212,6 @@ function App() {
                 }
 
                 setCurrentFrame(animFrameRef.current);
-                // Discard pending edits when frame advances
                 setPendingEdits(new Map());
             }
             rafId = requestAnimationFrame(tick);
@@ -221,11 +221,29 @@ function App() {
         return () => cancelAnimationFrame(rafId);
     }, [isPlaying, currentAnimation, armature, mode]);
 
-    // Discard pending edits when frame is manually changed
+    /** Discard pending edits and restore transform snapshots, then change frame */
     const handleChangeFrame = useCallback((frame: number) => {
-        setPendingEdits(new Map());
+        if (pendingEdits.size > 0 && projectData) {
+            // Restore snapshots
+            const arm = projectData.armatures[0];
+            if (arm) {
+                transformSnapshotRef.current.forEach((snapshot, key) => {
+                    const [type, name] = key.split(':');
+                    if (type === 'bone') {
+                        const bone = arm.bones.find((b: BoneData) => b.name === name);
+                        if (bone) Object.assign(bone.localTransform, snapshot);
+                    } else if (type === 'slot') {
+                        const skin = arm.skins?.[0];
+                        const skinSlot = skin?.slots.find((ss: any) => ss.name === name);
+                        if (skinSlot?.displays?.[0]) Object.assign(skinSlot.displays[0].transform, snapshot);
+                    }
+                });
+            }
+            transformSnapshotRef.current.clear();
+            setPendingEdits(new Map());
+        }
         setCurrentFrame(frame);
-    }, []);
+    }, [pendingEdits, projectData]);
 
     const handleMoveSlot = useCallback((slotName: string, direction: 'up' | 'down') => {
         if (!projectData) return;
@@ -253,13 +271,21 @@ function App() {
     // selectedInfo is already defined above
 
     // Handle transform property changes
-    // - field='commit': drag ended, re-sync React state
-    // - field='rotation': update both skewX and skewY
-    // - animation mode: in recording, write keyframe; otherwise accumulate pendingEdits
     const handleTransformChange = useCallback((field: string, delta: number) => {
         if (!projectData) return;
+
+        const isAnimStopped = mode === 'animation' && !isPlaying;
+        const isNonRecordAnim = isAnimStopped && !isRecording;
+
         if (field === 'commit') {
-            setProjectData({ ...projectData });
+            if (isNonRecordAnim) {
+                // Don't persist: the canvas mutation already happened for display,
+                // but we do NOT save it to React state. The snapshot will be restored on frame change.
+                // Just trigger a UI re-render for PropertiesPanel to reflect current values.
+                setProjectData(prev => prev ? { ...prev } : prev);
+            } else {
+                setProjectData({ ...projectData });
+            }
             return;
         }
 
@@ -278,6 +304,11 @@ function App() {
         }
         if (!transform) return;
 
+        // In non-recording animation mode: save snapshot BEFORE first modification
+        if (isNonRecordAnim && itemKey && !transformSnapshotRef.current.has(itemKey)) {
+            transformSnapshotRef.current.set(itemKey, { ...transform });
+        }
+
         if (field === 'rotation') {
             transform.skewX += delta;
             transform.skewY += delta;
@@ -285,40 +316,24 @@ function App() {
             transform[field] += delta;
         }
 
-        // In animation mode with recording: immediately save as keyframe
+        if (isNonRecordAnim && itemKey) {
+            // Temporary: only update pendingEdits marker, don't call setProjectData
+            setPendingEdits(prev => {
+                const m = new Map(prev);
+                m.set(itemKey, { [field]: delta });
+                return m;
+            });
+            // Don't persist to state — canvas already updated via PIXI mutation
+            return;
+        }
+
+        // Recording mode: immediately write keyframe
         if (mode === 'animation' && isRecording && selectedBone && currentAnimation && itemKey) {
             let timeline = currentAnimation.bone.find(t => t.name === selectedBone);
             if (!timeline) {
                 timeline = { name: selectedBone, translateFrame: [], rotateFrame: [], scaleFrame: [] };
                 currentAnimation.bone.push(timeline);
             }
-            // Upsert single-frame keyframes at current position for the relevant track
-            if (field === 'x' || field === 'y' || field === 'rotation') {
-                if (timeline.translateFrame.length === 0) {
-                    timeline.translateFrame.push({ duration: Math.max(1, currentAnimation.duration), x: transform.x, y: transform.y, tweenEasing: 0 });
-                } else {
-                    // Just update the closest keyframe value (simplified)
-                    const last = timeline.translateFrame[timeline.translateFrame.length - 1];
-                    last.x = transform.x; last.y = transform.y;
-                }
-            }
-            // Track pending state
-            if (itemKey) {
-                setPendingEdits(prev => {
-                    const m = new Map(prev);
-                    const cur = m.get(itemKey) || {};
-                    m.set(itemKey, { ...cur, [field]: transform[field] });
-                    return m;
-                });
-            }
-        } else if (mode === 'animation' && !isPlaying && !isRecording && itemKey) {
-            // Animation mode, stopped, not recording: accumulate pending edits (temporary)
-            setPendingEdits(prev => {
-                const m = new Map(prev);
-                const cur = m.get(itemKey) || {};
-                m.set(itemKey, { ...cur, [field]: transform[field] });
-                return m;
-            });
         }
 
         setProjectData({ ...projectData });

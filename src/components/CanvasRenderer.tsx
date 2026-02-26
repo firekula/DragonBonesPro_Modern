@@ -127,6 +127,14 @@ export function CanvasRenderer({
     }, [projectData, selectedArmatureIndex]);
 
     // (applyDeltaDirectly and handleToolDragEnd are defined after updateRendering below)
+    // Refs to always-latest values, avoiding stale closures in drag callbacks
+    const selectedBoneRef = useRef(selectedBone);
+    const selectedSlotRef = useRef(selectedSlot);
+    useEffect(() => { selectedBoneRef.current = selectedBone; }, [selectedBone]);
+    useEffect(() => { selectedSlotRef.current = selectedSlot; }, [selectedSlot]);
+    const onTransformChangeRef = useRef(onTransformChange);
+    useEffect(() => { onTransformChangeRef.current = onTransformChange; }, [onTransformChange]);
+    // updateRenderingRef and updateBonesAndSpritesRef are set after those callbacks are defined below
 
     // Initialize scene when app is ready or project data changes
     useEffect(() => {
@@ -479,6 +487,8 @@ export function CanvasRenderer({
         );
     // projectData changes trigger re-render since armature ref is updated above
     }, [currentAnimation, currentFrame, selectedBone, selectedSlot, selectedTool, onSelectBone, onTransformChange]);
+    const updateRenderingRef = useRef(updateRendering);
+    useEffect(() => { updateRenderingRef.current = updateRendering; }, [updateRendering]);
 
     /**
      * Lightweight update: only refreshes bone wireframes and sprite positions.
@@ -557,11 +567,10 @@ export function CanvasRenderer({
             boneJoints, selectedBone, zoomRef.current, onSelectBone
         );
     }, [currentAnimation, currentFrame, selectedBone, onSelectBone]);
+    const updateBonesAndSpritesRef = useRef(updateBonesAndSprites);
+    useEffect(() => { updateBonesAndSpritesRef.current = updateBonesAndSprites; }, [updateBonesAndSprites]);
 
-    /**
-     * During drag: apply delta directly to the armature transform and re-render via PIXI
-     * (bypasses React state to prevent flicker; only updates bones+sprites, NOT control points).
-     */
+    // Use refs so updateRendering always gets the latest callbacks without dep-cycle
     const applyDeltaDirectly = useCallback((field: string, canvasPixelDelta: number) => {
         const zoom = zoomRef.current;
         const worldDelta = field === 'rotation' ? canvasPixelDelta : canvasPixelDelta / zoom;
@@ -570,12 +579,15 @@ export function CanvasRenderer({
         if (!arm) return;
 
         let transform: any = null;
-        const bone = arm.bones.find((b: any) => b.name === selectedBone);
+        // Always read from renderingRef so we have latest selectedBone/selectedSlot via closure
+        const boneName = selectedBoneRef.current;
+        const slotName = selectedSlotRef.current;
+        const bone = boneName ? arm.bones.find((b: any) => b.name === boneName) : null;
         if (bone) {
             transform = bone.localTransform;
-        } else if (selectedSlot) {
+        } else if (slotName) {
             const skin = arm.skins?.[0];
-            const skinSlot = skin?.slots.find((ss: any) => ss.name === selectedSlot);
+            const skinSlot = skin?.slots.find((ss: any) => ss.name === slotName);
             if (skinSlot?.displays?.[0]) transform = skinSlot.displays[0].transform;
         }
         if (!transform) return;
@@ -586,20 +598,21 @@ export function CanvasRenderer({
         } else {
             transform[field] += worldDelta;
         }
-        // Only refresh bones+sprites during drag; control points stay untouched = no flicker
-        updateBonesAndSprites();
-    }, [selectedBone, selectedSlot, zoomRef, updateBonesAndSprites]);
+        updateBonesAndSpritesRef.current();
+    }, [zoomRef, updateBonesAndSprites]);
 
     const handleToolTransformChange = useCallback((field: string, canvasPixelDelta: number) => {
         applyDeltaDirectly(field, canvasPixelDelta);
     }, [applyDeltaDirectly]);
+    const handleToolTransformChangeRef = useRef(handleToolTransformChange);
+    useEffect(() => { handleToolTransformChangeRef.current = handleToolTransformChange; }, [handleToolTransformChange]);
 
     const handleToolDragEnd = useCallback(() => {
-        // Full re-render after drag ends: rebuilds control points at updated position
-        updateRendering();
-        // One-time commit: signal App.tsx to shallow-copy projectData so PropertiesPanel refreshes
-        if (onTransformChange) onTransformChange('commit', 0);
-    }, [onTransformChange, updateRendering]);
+        updateRenderingRef.current();
+        if (onTransformChangeRef.current) onTransformChangeRef.current('commit', 0);
+    }, []);
+    const handleToolDragEndRef = useRef(handleToolDragEnd);
+    useEffect(() => { handleToolDragEndRef.current = handleToolDragEnd; }, [handleToolDragEnd]);
 
     // Update rendering when animation/selection/tool changes (NOT on every projectData change - drags go through applyDeltaDirectly)
     useEffect(() => {
