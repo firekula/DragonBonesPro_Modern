@@ -76,40 +76,42 @@ modern-editor/
 - **缩放工具**：8 个方向缩放手柄（边中点 + 四角）
 - **旋转工具**：角度手柄（`atan2` 向量角度计算，支持完整 360°，处理 ±180° 折返）
 - **实现细节**：
-    - 事件系统：使用 **PIXI stage 的 `pointermove/pointerup`**（非 `document.addEventListener`），坐标统一使用 `e.global.x/y`（canvas pixel 坐标），彻底消除坐标系混用
-    - **无闪烁拖动**：拖动期间直接修改 `renderingRef.current.armature` 数据并调用 `updateRendering()`，完全绕过 React 重渲染；松手后通过哨兵信号一次性 `setProjectData` 同步状态
-    - Zoom 适配：CanvasRenderer 的 wrapper 将 canvas 像素增量除以当前 zoom，得到 DragonBones 世界单位
-    - 控制点大小缩放无关：`controlSize = 16 / zoom`，始终保持 16px 视觉大小
-    - 旋转使用单一 `rotation` 字段，App.tsx 同步修改 `skewX` 和 `skewY`，确保纯旋转无 skew 畸变
+    - 事件系统：使用 **PIXI stage 的 `pointermove/pointerup`**，坐标统一使用 `e.global.x/y`
+    - **世界→本地坐标转换**：移动/缩放 delta 来自世界坐标系（画布像素），通过递归计算父骨骼累积世界矩阵的**旋转-缩放逆矩阵**，将其变换为 DragonBones 本地坐标再写入 `localTransform`。根骨骼（无父）直接赋值
+    - **无闪烁拖动**：拖动期间调用 `updateBonesAndSprites()`（轻量，不清除控制点层）；松手后 `handleToolDragEnd` 调用完整 `updateRendering()` 重建控制点，再通过 `'commit'` 哨兵一次性同步 React 状态
+    - **Stale Closure 防护**：`selectedBoneRef`/`selectedSlotRef` 等 5 个 refs 实时同步，`applyDeltaDirectly` 和 `handleToolDragEnd` 通过 refs 访问最新值，避免闭包陷阱
+    - Zoom 适配：canvas 像素增量除以当前 zoom 得到世界单位
+    - 控制点大小缩放无关：`controlSize = 16 / zoom`
+    - 旋转使用单一 `rotation` 字段，`App.tsx` 同步修改 `skewX`/`skewY`，确保纯旋转无 skew 畸变
 
 ### 4. 模式切换
 
-- **编辑模式**：
-    - 暂停动画播放
-    - 可以编辑骨骼/插槽的 Transform 属性
-    - 可以使用编辑工具进行可视化编辑
-- **动画模式**：
-    - 自动开始播放动画
-    - 支持录制功能（待实现）
-    - 支持设置关键帧（待实现）
+- **编辑模式**：暂停动画，可使用工具调整骨骼/插槽 Transform；底部**时间线隐藏**（防止误操作）
+- **动画模式（停止+非录制）**：可临时预览修改，切帧或播放时自动丢弃，属性面板显示 `✎ 未保存` 橙色徽章
+- **动画模式（录制）**：开启时自动暂停，任何修改立即写入当前帧关键帧，属性面板显示 `● REC` 闪烁红色徽章
+- **动画播放中**：属性面板所有字段禁用（灰色），防止误编辑
 
 ### 5. 选中交互
 
 - **像素级精确点击**：通过 `hitArea` API 采样贴图 alpha 通道，仅非透明区域响应
 - **透明区域穿透**：上层精灵的透明区域不阻挡下层精灵的点击
 - **骨骼关节点击**：点击骨骼原点圆圈选中骨骼
-- **点击空白取消选中**：Stage pointerdown 清除选中
-- **选中效果**：
-    - 虚线边界框（灰色虚线矩形）
-    - 白色轮廓线（2px 半径边缘检测，提取非透明像素轮廓）
-- **缩放无关线宽**：骨骼线条、关节点、虚线框的线宽除以 zoomRef.current
+- **点击空白取消选中**：Stage `pointerdown` 清除选中
+- **悬停轮廓**：鼠标悬停精灵时显示**白色虚线矩形**（基于 `worldTransform` 四角变换，手动分段绘制，无 React 重渲染）
+- **选中轮廓**：选中精灵时 `updateRendering` 绘制**蓝色 `#4a9eff` 实线矩形**，并清除悬停轮廓
+- **选中后显示工具控制点**：根据当前工具（移动/缩放/旋转）在 `outlineLayer` 绘制对应控制手柄
+- **缩放无关线宽**：所有轮廓线宽除以 `zoomRef.current`
 
-### 6. 属性面板
+### 6. 属性面板 (PropertiesPanel)
 
-- 显示选中骨骼/插槽的 Transform 属性
-- **可编辑**：X、Y、Rotation、ScaleX、ScaleY、SkewY
-- **快速修改**：数字部分可以左右拖动快速修改
-- 修改数值后画布实时刷新
+- 显示选中骨骼/插槽的 Transform 属性（X/Y/Rotation/ScaleX/ScaleY/SkewY）
+- **快速修改**：数字输入框可以左右拖动快速调整
+- **动画模式状态徽章**：
+    - `● REC`（红色闪烁）：录制中
+    - `▶ PLAY`（黄色）：播放中，所有字段禁用
+    - `✎ 未保存`（橙色）：有临时修改尚未保存，切帧/播放后丢弃
+    - `ANIM`（蓝色）：动画模式停止，可临时编辑
+- **骨骼 Inheritance**：平移/旋转/缩放继承开关（可视化）
 
 ### 7. 场景树 (SceneTree)
 
@@ -125,16 +127,21 @@ modern-editor/
 ### 9. 动画系统
 
 - **数据模型**：`AnimationData` → `BoneTimeline[]` → `TranslateKeyframe[]` / `RotateKeyframe[]` / `ScaleKeyframe[]`
-- **关键帧插值**：`AnimationPlayer.ts` — `findKeyframe` 查找 + `lerp` 线性插值
-- **播放循环**：`requestAnimationFrame` 驱动，按 frameRate 推进帧
-- **动画控制**：播放/暂停/步进/重置按钮
-- **动画选择器**：下拉菜单切换不同动画
-- **时间轴 UI**：
-    - 左侧骨骼名称列表
-    - 右侧帧刻度 + 关键帧菱形标记（蓝色=位移，绿色=旋转）
-    - 红色播放头指示当前帧
+- **关键帧插值**：`AnimationPlayer.ts` — `lerpWithCurve` 支持 hold（无 tweenEasing）、线性（tweenEasing=0）、贝塞尔曲线（Newton-Raphson 数值求解 12 次迭代）
+- **贝塞尔曲线**：`DataModel.ts` 定义 `BezierCurve { cx1, cy1, cx2, cy2 }`，`ProjectParser.ts` 解析原始 `curve` 数组，`AnimationPlayer.ts` 自动选用
+- **播放循环**：`requestAnimationFrame` 驱动，按 `frameRate` 推进帧
+- **动画编辑**：
+    - 停止+非录制：临时预览，切帧/播放自动还原快照
+    - 录制模式：修改立即写入当前帧关键帧（开启录制自动暂停）
+    - `handleSetKeyframe`：手动将当前 transform 写入 `currentFrame`，支持覆盖/分割插入
+- **时间轴 UI** (`TimelinePanel.tsx`)：
+    - 骨骼标签列与帧轨道**同步纵向滚动**（`onScroll` 互相同步 `scrollTop`）
+    - 帧格宽 14px，关键帧菱形**精确居中**于对应帧格（`framePos × 14 + 7 - 5`）
+    - 颜色区分：蓝色=位移、绿色=旋转、橙色=缩放；有贝塞尔曲线的关键帧显示金色外框
+    - **右键关键帧**弹出贝塞尔曲线编辑器：Canvas 预览 + 4 个数值输入 + Linear/Ease In/Ease Out/Ease 预设
+    - 红色播放头居中对齐帧格
 
-### 8. 窗口自适应
+### 10. 窗口自适应
 
 - `ResizeObserver` 监听容器尺寸变化
 - 全屏/窗口切换自动刷新画布
@@ -151,11 +158,13 @@ DragonBonesData
 │   └── animations: AnimationData[]  // 动画
 │       ├── name, duration, playTimes
 │       └── bone: BoneTimeline[]
-│           ├── translateFrame: TranslateKeyframe[]  // {x, y, duration, tweenEasing}
-│           ├── rotateFrame: RotateKeyframe[]        // {rotate, duration, tweenEasing}
-│           └── scaleFrame: ScaleKeyframe[]          // {x, y, duration, tweenEasing}
+│           ├── translateFrame: TranslateKeyframe[]  // {x, y, duration, tweenEasing, curve?}
+│           ├── rotateFrame: RotateKeyframe[]        // {rotate, duration, tweenEasing, curve?}
+│           └── scaleFrame: ScaleKeyframe[]          // {x, y, duration, tweenEasing, curve?}
 ├── images: Record<string, string>  // Blob URL 映射
 └── textureAtlas: { SubTexture[] }  // 贴图集 JSON
+
+BezierCurve { cx1, cy1, cx2, cy2 }  // 三次贝塞尔控制点（0–1 归一化）
 ```
 
 ## 开发命令

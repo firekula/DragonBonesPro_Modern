@@ -1,5 +1,40 @@
 ## 2026-02-26
 
+### v1.0.0 — 编辑体验全面优化
+
+- **修复（坐标系）** `CanvasRenderer.tsx` → `applyDeltaDirectly`：
+    - 移动/缩放 delta 来自世界坐标，但骨骼 `localTransform` 是本地坐标
+    - 现在针对 `x`/`y` 字段，递归计算父骨骼的**累积世界矩阵**并取其旋转-缩放部分的逆矩阵
+    - 将世界空间 delta 向量 `(Δx, 0)` / `(0, Δy)` 变换为本地空间 delta，写入 `localTransform`
+    - 根骨骼（无父）直接赋值，行为不变
+- **新增（编辑模式）** `App.tsx`：编辑模式（`mode === 'edit'`）隐藏底部时间线，防止误操作
+- **新增（悬停轮廓）** `CanvasRenderer.tsx`：
+    - 新建 `hoverGraphics` 层（最顶层，直接 PIXI 操作，无 React 重渲染）
+    - 鼠标悬停精灵：绘制**白色虚线矩形**轮廓（基于 `worldTransform` 将 localBounds 四角变换到世界空间，手动分段绘制虚线）
+    - 选中精灵：`updateRendering` 绘制**蓝色 `#4a9eff` 实线**矩形轮廓 + 清除 hoverGraphics
+
+### v0.9.3 — 5 项 Bug 修复
+
+- **修复（slot 控制点消失）** `CanvasRenderer.tsx`：
+    - 根本原因：`updateRendering` 的 `useCallback` 依赖数组缺少 `handleToolTransformChange`/`handleToolDragEnd`，导致闭包中的 `selectedBone`/`selectedSlot` 始终为初始值（stale closure）
+    - 解决：添加 `selectedBoneRef`、`selectedSlotRef`、`onTransformChangeRef`、`updateRenderingRef`、`updateBonesAndSpritesRef` 五个 refs，每次渲染后同步
+    - `applyDeltaDirectly` 和 `handleToolDragEnd` 改为通过 refs 访问最新值，彻底消除 stale closure
+- **修复（动画模式修改持久化）** `App.tsx`：
+    - 新增 `transformSnapshotRef`：非录制动画模式第一次修改某对象前，保存 transform 快照
+    - `handleTransformChange`：非录制动画模式下 `field !== 'commit'` 时**不写入 `projectData`**，只更新 `pendingEdits` 标记；`'commit'` 时也不持久化
+    - `handleChangeFrame`：切换帧时若有 snapshot，通过 `Object.assign` 还原所有被修改的 transform，再清空 snapshot
+- **修复（时间线无法滚动）** `TimelinePanel.tsx`：
+    - 骨骼标签列和帧轨道区分别设 `overflow-y-scroll`，通过 `onScroll` 回调互相同步 `scrollTop`
+- **修复（关键帧位置偏移）** `TimelinePanel.tsx`：
+    - 位置计算改为 `framePos × FRAME_WIDTH + FRAME_WIDTH / 2 - 5`，菱形精确居中于帧格中心线
+    - 播放头红线同步改为居中对齐：`left = currentFrame × FRAME_WIDTH + FRAME_WIDTH / 2 - 1`
+- **新增（贝塞尔曲线编辑器）** `TimelinePanel.tsx`：
+    - 右键关键帧菱形弹出浮层编辑器
+    - Canvas 实时预览（含控制点手柄、对角线辅助）
+    - 4 个控制点数值输入（cx1/cy1/cx2/cy2，范围 0–1）
+    - Linear / Ease In / Ease Out / Ease 预设按钮一键应用
+    - 已设曲线的关键帧显示金色外框
+
 ### v0.9.2 — 动画模式编辑系统
 
 - **新增** 录制模式自动停止播放：点击录制按钮时若正在播放，先暂停再开启录制
