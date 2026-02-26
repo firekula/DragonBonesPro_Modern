@@ -446,22 +446,24 @@ function App() {
                         )}
                     </div>
 
-                    {/* Timeline Panel */}
-                    <TimelinePanel
-                        animations={animations as AnimationData[]}
-                        currentAnimation={currentAnimation}
-                        selectedAnimIndex={selectedAnimIndex}
-                        setSelectedAnimIndex={setSelectedAnimIndex}
-                        currentFrame={currentFrame}
-                        setCurrentFrame={handleChangeFrame}
-                        isPlaying={isPlaying}
-                        setIsPlaying={setIsPlaying}
-                        isRecording={isRecording}
-                        handleRecordToggle={handleRecordToggle}
-                        selectedInfo={selectedInfo as any}
-                        handleSetKeyframe={handleSetKeyframe}
-                        handleSelectBone={handleSelectBone}
-                    />
+                    {/* Timeline Panel — only visible in animation mode */}
+                    {mode === 'animation' && (
+                        <TimelinePanel
+                            animations={animations as AnimationData[]}
+                            currentAnimation={currentAnimation}
+                            selectedAnimIndex={selectedAnimIndex}
+                            setSelectedAnimIndex={setSelectedAnimIndex}
+                            currentFrame={currentFrame}
+                            setCurrentFrame={handleChangeFrame}
+                            isPlaying={isPlaying}
+                            setIsPlaying={setIsPlaying}
+                            isRecording={isRecording}
+                            handleRecordToggle={handleRecordToggle}
+                            selectedInfo={selectedInfo as any}
+                            handleSetKeyframe={handleSetKeyframe}
+                            handleSelectBone={handleSelectBone}
+                        />
+                    )}
                 </div>
 
                 {/* Right Panel - Properties */}

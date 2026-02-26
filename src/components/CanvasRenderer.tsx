@@ -110,6 +110,7 @@ export function CanvasRenderer({
         boneLayer: null as PIXI.Container | null,
         boneGraphics: null as PIXI.Graphics | null,
         outlineLayer: null as PIXI.Container | null,
+        hoverGraphics: null as PIXI.Graphics | null, // always-on-top hover outline
         slotSprites: new Map<string, PIXI.Sprite>(),
         boneJoints: new Map<string, PIXI.Graphics>(),
         armature: null as any,
@@ -183,6 +184,10 @@ export function CanvasRenderer({
         rootContainer.removeChild(boneLayer);
         rootContainer.addChild(boneLayer);
 
+        // Hover + selection outline Graphics (always topmost, drawn directly)
+        const hoverGraphics = new PIXI.Graphics();
+        rootContainer.addChild(hoverGraphics);
+
         // Build lookup: slotName -> SkinSlotData (from first skin)
         const skinSlotMap: Record<string, any> = {};
         if (armature.skins && armature.skins[0]) {
@@ -205,6 +210,7 @@ export function CanvasRenderer({
             boneLayer,
             boneGraphics,
             outlineLayer,
+            hoverGraphics,
             slotSprites: new Map(),
             boneJoints: new Map(),
             armature,
@@ -271,8 +277,46 @@ export function CanvasRenderer({
                         sprite.on('pointerdown', (e: PIXI.FederatedPointerEvent) => {
                             if (e.button === 0 && onSelectSlot) {
                                 onSelectSlot(slot.name);
-                                e.stopPropagation(); // 阻止事件冒泡，防止触发舞台的点击事件
+                                e.stopPropagation();
                             }
+                        });
+
+                        // Hover outline: white dashed when hovering unselected sprites
+                        sprite.on('pointerover', () => {
+                            const hg = renderingRef.current.hoverGraphics;
+                            if (!hg) return;
+                            hg.clear();
+                            const bounds = sprite.getLocalBounds();
+                            const mat = sprite.worldTransform;
+                            // Draw dashed white rectangle in world space using the sprite's transform
+                            const corners = [
+                                [bounds.left, bounds.top], [bounds.right, bounds.top],
+                                [bounds.right, bounds.bottom], [bounds.left, bounds.bottom],
+                            ].map(([lx, ly]) => mat.apply({ x: lx, y: ly }));
+                            hg.setStrokeStyle({ width: 1.2 / (zoomRef.current || 1), color: 0xffffff, alpha: 0.75 });
+                            // Dash simulation
+                            const dashLen = 4 / (zoomRef.current || 1);
+                            const gapLen = 3 / (zoomRef.current || 1);
+                            for (let ci = 0; ci < corners.length; ci++) {
+                                const a = corners[ci];
+                                const b = corners[(ci + 1) % corners.length];
+                                const dx = b.x - a.x, dy = b.y - a.y;
+                                const len = Math.sqrt(dx * dx + dy * dy);
+                                const ux = dx / len, uy = dy / len;
+                                let t = 0;
+                                while (t < len) {
+                                    const startX = a.x + ux * t, startY = a.y + uy * t;
+                                    const endT = Math.min(t + dashLen, len);
+                                    const endX = a.x + ux * endT, endY = a.y + uy * endT;
+                                    hg.moveTo(startX, startY);
+                                    hg.lineTo(endX, endY);
+                                    t += dashLen + gapLen;
+                                }
+                            }
+                            hg.stroke();
+                        });
+                        sprite.on('pointerout', () => {
+                            renderingRef.current.hoverGraphics?.clear();
                         });
 
                         spriteLayer.addChild(sprite);
@@ -298,7 +342,7 @@ export function CanvasRenderer({
 
     // Helper function to update rendering without recreating the entire scene
     const updateRendering = useCallback(() => {
-        const { boneLayer, boneGraphics, outlineLayer, slotSprites, boneJoints, armature, skinSlotMap, subTextureMap, alphaCtx } = renderingRef.current;
+        const { boneLayer, boneGraphics, outlineLayer, slotSprites, boneJoints, armature, skinSlotMap, subTextureMap, alphaCtx, hoverGraphics } = renderingRef.current;
         if (!armature || !boneGraphics) return;
 
         // Helper to find a bone by name
@@ -419,6 +463,29 @@ export function CanvasRenderer({
                         const controlSize = 16 / zoom;
                         const controlLineLength = 32 / zoom;
                         const arrowSize = 6 / zoom;
+
+                    // Clear hover outline when something is selected
+                    hoverGraphics?.clear();
+
+                    // Blue solid selection outline for selected slot sprite
+                    if (selectedSlot) {
+                        const selSprite = slotSprites?.get(selectedSlot);
+                        if (selSprite) {
+                            const selBounds = selSprite.getLocalBounds();
+                            const selMat = selSprite.worldTransform;
+                            const selCorners = [
+                                [selBounds.left, selBounds.top], [selBounds.right, selBounds.top],
+                                [selBounds.right, selBounds.bottom], [selBounds.left, selBounds.bottom],
+                            ].map(([lx, ly]) => selMat.apply({ x: lx, y: ly }));
+                            const selG = new PIXI.Graphics();
+                            selG.setStrokeStyle({ width: 1.5 / zoom, color: 0x4a9eff, alpha: 1 });
+                            selG.moveTo(selCorners[0].x, selCorners[0].y);
+                            selCorners.slice(1).forEach(c => selG.lineTo(c.x, c.y));
+                            selG.lineTo(selCorners[0].x, selCorners[0].y);
+                            selG.stroke();
+                            outlineLayer.addChild(selG);
+                        }
+                    }
 
                     // Draw tool controls based on selectedTool
                     if (selectedTool === 'move') {
@@ -579,13 +646,16 @@ export function CanvasRenderer({
         if (!arm) return;
 
         let transform: any = null;
-        // Always read from renderingRef so we have latest selectedBone/selectedSlot via closure
+        let parentBoneName: string | undefined;
         const boneName = selectedBoneRef.current;
         const slotName = selectedSlotRef.current;
         const bone = boneName ? arm.bones.find((b: any) => b.name === boneName) : null;
         if (bone) {
             transform = bone.localTransform;
+            parentBoneName = bone.parentBoneName;
         } else if (slotName) {
+            const slotInfo = arm.slots?.find((s: any) => s.name === slotName);
+            parentBoneName = slotInfo?.parentBoneName;
             const skin = arm.skins?.[0];
             const skinSlot = skin?.slots.find((ss: any) => ss.name === slotName);
             if (skinSlot?.displays?.[0]) transform = skinSlot.displays[0].transform;
@@ -595,6 +665,37 @@ export function CanvasRenderer({
         if (field === 'rotation') {
             transform.skewX += worldDelta;
             transform.skewY += worldDelta;
+        } else if ((field === 'x' || field === 'y') && parentBoneName) {
+            // Convert world-space delta to local-space delta via parent inverse matrix
+            const DEG_TO_RAD = Math.PI / 180;
+            const gtCache: Record<string, PIXI.Matrix> = {};
+            const findB = (n: string) => arm.bones.find((b: any) => b.name === n);
+            const getGM = (b: any): PIXI.Matrix => {
+                if (gtCache[b.name]) return gtCache[b.name];
+                const m = new PIXI.Matrix();
+                const { skewX, skewY, scaleX, scaleY, x, y } = b.localTransform;
+                m.a = Math.cos(skewY * DEG_TO_RAD) * scaleX;
+                m.b = Math.sin(skewY * DEG_TO_RAD) * scaleX;
+                m.c = -Math.sin(skewX * DEG_TO_RAD) * scaleY;
+                m.d = Math.cos(skewX * DEG_TO_RAD) * scaleY;
+                m.tx = x; m.ty = y;
+                if (b.parentBoneName) { const pb = findB(b.parentBoneName); if (pb) m.prepend(getGM(pb)); }
+                gtCache[b.name] = m;
+                return m;
+            };
+            const parentBone = findB(parentBoneName);
+            if (parentBone) {
+                // Only rotation-scale part of inverse (zero translation so delta maps correctly)
+                const inv = getGM(parentBone).clone();
+                inv.tx = 0; inv.ty = 0;
+                inv.invert();
+                const wdx = field === 'x' ? worldDelta : 0;
+                const wdy = field === 'y' ? worldDelta : 0;
+                transform.x += inv.a * wdx + inv.c * wdy;
+                transform.y += inv.b * wdx + inv.d * wdy;
+            } else {
+                transform[field] += worldDelta;
+            }
         } else {
             transform[field] += worldDelta;
         }
