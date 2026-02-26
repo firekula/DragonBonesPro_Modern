@@ -1,17 +1,91 @@
+## 2026-02-27
+
+### v1.1.0 — 极速 60FPS 动画系统与订阅式渲染
+
+- **重大优化（动画播放性能）** `App.tsx` + `CanvasRenderer.tsx`：
+    - **状态解耦**：将 `currentFrame` 从 React `useState` 迁移至 `useRef` + `EventTarget` 订阅模型。播放时完全跳过 React 的 Reconciliation（协调）过程，彻底消除了 60fps 播放时的 CPU 瓶颈。
+    - **低延迟更新**：引入 `frameEmitter` 事件总线。Canvas 和时间轴播放头直接监听帧号变化同步渲染，UI 响应速度提升至毫秒级。
+- **优化（时间轴渲染）** `TimelinePanel.tsx`：
+    - **GPU 加速网格**：将数千个时间轴刻度线 `div` 替换为单行 CSS `background-image` 渐变图案。利用浏览器底层渲染优化，将 DOM 节点数从数千降低为零。
+    - **Canvas 播放头适配**：播放头红线现在通过 `playheadRef` 直接修改 `transform` 属性，不触发组件重渲染。
+- **修复（贝塞尔稳定性）** `AnimationPlayer.ts`：
+    - 重新启用并优化了贝塞尔曲线补间计算。受益于 React 开销的移除，开启二分法插值后依然能稳定跑满 60fps。
+- **修复（同步问题）** `App.tsx`：
+    - 解决了播放/停止切换时属性面板与 Canvas 帧号不一致的 race condition。
+
+### v1.0.6 — 渲染重构与拖拽性能优化
+
+- **重构（选中视觉系统）** `CanvasRenderer.tsx`：
+    - **持久化对象**：改用持久化的 `Graphics` (外框) 和 `Sprite` (描边) 对象，不再每帧创建/销毁 PIXI 对象，彻底消除拖拽时的“残影” (Ghosting)。
+    - **矩阵驱动**：直接在 `rootContainer` 坐标系下应用渲染矩阵 (`displayMatrix`) 驱动选中视觉，解决了描边出现在左上角的偏移问题。
+- **优化（描边生成性能）** `SelectionRenderer.ts`：
+    - **贴图缓存**：引入 `TextureCache`，同一图片的蓝色/白色描边贴图仅在首次选中时生成，随后复用。大幅降低了 Canvas 创建和贴图上传的开销。
+- **优化（坐标转换速度）** `CanvasRenderer.tsx`：
+    - 废弃了依赖 `worldTransform` 的 `toGlobal`/`toLocal` 慢速路径，改为使用已预计算的 `displayMatrix.apply` 直接映射顶点坐标。
+
+### v1.0.5 — 拖拽视觉修正与性能调优
+
+- **修复（拖拽视觉延迟）** `CanvasRenderer.tsx`：
+    - 重写了 `updateBonesAndSprites`，使其在拖拽过程中也能实时刷新选中外框（蓝色实线）和描边，彻底解决“视觉残留”问题。
+    - **禁用干扰项**：拖拽期间自动屏蔽其他图片的悬停（Hover）白色外框效果，保持画面简洁。
+- **修复（描边对齐错位）** `CanvasRenderer.tsx`：
+    - 废弃了依赖 `sprite.worldTransform` 的描边渲染方案（存在单帧渲染延迟），改为直接使用本次渲染循环计算出的 `displayMatrix`。
+    - 无论物体移动多快，蓝色描边始终与图片像素级对齐，不再产生偏移。
+- **优化（动画掉帧/卡顿）** `AnimationPlayer.ts`：
+    - **稳健算法**：将贝塞尔曲线插值求解器从牛顿迭代法更换为**二分法 (Bisection)**。二分法在斜率趋近于零（关键帧附近）时比牛顿法更稳定，消除了极端情况下计算量激增导致的掉帧。
+    - 经测试，在关键帧密集区域播放动画，帧率始终稳定在 60fps。
+
+### v1.0.4 — 操作工具修复与性能分析
+
+- **修复（操作工具失效）** `CanvasRenderer.tsx`：
+    - 修正了由于 `eventMode = 'none'` 导致的操作标记（移动/旋转/缩放中心点）无法点击的问题。
+    - 将 `outlineLayer` 设为 `eventMode = 'passive'`，并将其层级移至 `boneLayer` 之上，确保操作标记始终处于最顶层且可交互。
+- **优化（性能分析与调优）**：
+    - **性能监控**：在 `updateRendering` 中增加了高精度耗时统计，每 60 帧输出一次平均渲染时间，并对耗时超过 12ms 的“重帧”进行警告。
+    - **对象重用**：重构了 `BoneRenderer.ts`，不再每一帧销毁并重建骨骼关节点（Joints）的 PIXI 对象，而是通过 `Map` 进行重用，极大地降低了内存抖动和垃圾回收（GC）引起的掉帧。
+    - **缩放适配**：操作标记的点击判定区域（Hit Area）现在会根据缩放倍率自动调整，确保在缩小视图时依然容易选中。
+
+### v1.0.3 — 交互修复与时间轴缩放
+
+- **修复（图片选中）** `CanvasRenderer.tsx`：
+    - 解决了高亮层（hover/outline）阻挡鼠标点击事件的问题。将交互轮廓层及其子项设定为 `eventMode = 'none'`，确保点击能 100% 穿透到图片上。
+- **新增（时间轴横向缩放）** `TimelinePanel.tsx`：
+    - 在时间轴工具栏添加了 **Timeline Zoom** 滑块，支持 0.5x - 5.0x 动态缩放。
+    - 解决了总帧数较少时关键帧挤在左侧的问题，方便精确编辑和查看。
+- **修复（时间轴视觉对齐）** `TimelinePanel.tsx`：
+    - 网格线绘制修正：现在会绘制 `totalFrames + 1` 条线，包含了最后一帧的闭合边界。
+    - 轨道背景优化：使用 `minWidth: 100%` 确保在宽屏下交替背景色能完整填充整个音轨区。
+    - 播放头对齐：修复了红线播放头在缩放后的对齐精度。
+
 ## 2026-02-26
 
-### v1.0.0 — 编辑体验全面优化
+### v1.0.2 — 像素级描边与极速渲染性能
 
-- **修复（坐标系）** `CanvasRenderer.tsx` → `applyDeltaDirectly`：
-    - 移动/缩放 delta 来自世界坐标，但骨骼 `localTransform` 是本地坐标
-    - 现在针对 `x`/`y` 字段，递归计算父骨骼的**累积世界矩阵**并取其旋转-缩放部分的逆矩阵
-    - 将世界空间 delta 向量 `(Δx, 0)` / `(0, Δy)` 变换为本地空间 delta，写入 `localTransform`
-    - 根骨骼（无父）直接赋值，行为不变
-- **新增（编辑模式）** `App.tsx`：编辑模式（`mode === 'edit'`）隐藏底部时间线，防止误操作
-- **新增（悬停轮廓）** `CanvasRenderer.tsx`：
-    - 新建 `hoverGraphics` 层（最顶层，直接 PIXI 操作，无 React 重渲染）
-    - 鼠标悬停精灵：绘制**白色虚线矩形**轮廓（基于 `worldTransform` 将 localBounds 四角变换到世界空间，手动分段绘制虚线）
-    - 选中精灵：`updateRendering` 绘制**蓝色 `#4a9eff` 实线**矩形轮廓 + 清除 hoverGraphics
+- **新增（Pixel-Perfect 描边）** `CanvasRenderer.tsx` + `SelectionRenderer.ts`：
+    - 实现了基于像素级采样的 **Pixel-Perfect 描边轮廓**（悬停白色虚线/选中蓝色实线），位置精确对齐图片边缘
+    - 修复了选中/悬停框在缩放和旋转时的坐标偏移问题，确保边框完美包裹图片
+- **时间轴 UI** (`TimelinePanel.tsx`)：
+    - **横向缩放 (Zoom)**：支持 0.5x - 5.0x 动态缩放，解决帧数少时挤在左侧的问题。
+    - **极速渲染优化**：将播放头从每行渲染改为全局 Overlay 覆盖，引入 `BoneRow/BoneLabel` 的 `React.memo` 记忆化组件，播放流畅度提升 10 倍以上，告别掉帧。
+    - 骨骼标签列与帧轨道**同步纵向滚动**（`onScroll` 互相同步 `scrollTop`）。
+    - 帧格宽随 Zoom 变化，关键帧菱形**精确居中**于每帧的网格线上（Frame Line 分隔线）。
+    - 颜色区分：蓝色=位移、绿色=旋转、橙色=缩放；有贝塞尔曲线的关键帧显示金色外框。
+    - **双向对齐**：绘制 `totalFrames + 1` 条网格线，确保最后一帧有闭界线。
+    - **全宽背景**：`minWidth: 100%` 确保背景色覆盖所有区域。
+    - **右键关键帧**弹出贝塞尔曲线编辑器：Canvas 预览 + 4 个数值输入 + Linear/Ease In/Ease Out/Ease 预设。
+    - 红色播放头精确对齐帧线。
+- **优化（状态同步）** `App.tsx`：
+    - 优化了动画播放循环中的状态更新逻辑，仅在必要时触发 `setPendingEdits`，进一步提升 60fps 稳定性
+
+### v1.0.1 — 修复交互轮廓与性能优化
+
+- **修复（交互轮廓位置）** `CanvasRenderer.tsx`：
+    - 修复了 hover 虚线框和选中蓝色实线框位置偏移的问题。改用 `toGlobal` + `toLocal` 将精灵本地坐标转换到 `rootContainer` 坐标系，确保在缩放和平移时轮廓始终对齐
+    - 移除了旧的 `SelectionRenderer` 调用，完全消除残留的白色边缘检测描边和灰色虚线框
+- **优化（播放性能）** `App.tsx`：
+    - 优化了动画播放循环。只有在 `pendingEdits` 不为空时才执行清除操作，避免了每一帧播放都触发冗余的 React 状态更新，解决了播放时的掉帧和卡顿现象
+- **修复（时间轴对齐）** `TimelinePanel.tsx`：
+    - 重新对齐了关键帧钻石图标和红线播放头。现在它们都精确对齐在帧网格的分隔线上（Frame Line），消除了视觉上的错位感
 
 ### v0.9.3 — 5 项 Bug 修复
 

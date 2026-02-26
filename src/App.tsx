@@ -10,6 +10,7 @@ import { TimelinePanel } from './components/TimelinePanel';
 import { PropertiesPanel } from './components/PropertiesPanel';
 
 function App() {
+    const renderStartTime = performance.now();
     const [isPlaying, setIsPlaying] = useState(false);
     const [projectData, setProjectData] = useState<DragonBonesData | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -32,9 +33,23 @@ function App() {
 
     // Animation state
     const [selectedAnimIndex, setSelectedAnimIndex] = useState(0);
-    const [currentFrame, setCurrentFrame] = useState(0);
+    const [currentFrame, _setCurrentFrame] = useState(0);
     const animFrameRef = useRef<number>(0);
     const lastTimeRef = useRef<number>(0);
+
+    // High-frequency state for animation (bypasses React loop during playback)
+    const currentFrameRef = useRef(0);
+    const frameEmitter = useRef(new EventTarget());
+
+    /** Helper to update frame both in state (for UI) and ref (for rendering) */
+    const setCurrentFrame = useCallback((frame: number, isFinal = false) => {
+        currentFrameRef.current = frame;
+        animFrameRef.current = frame;
+        frameEmitter.current.dispatchEvent(new CustomEvent('frameChange', { detail: frame }));
+        if (isFinal) {
+            _setCurrentFrame(frame);
+        }
+    }, []);
 
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -195,9 +210,13 @@ function App() {
         animFrameRef.current = currentFrame;
 
         const tick = (now: number) => {
-            const delta = now - lastTimeRef.current;
-            if (delta >= frameDuration) {
-                lastTimeRef.current = now - (delta % frameDuration);
+            const playbackTickGap = now - lastTimeRef.current;
+            if (playbackTickGap >= frameDuration) {
+                if (playbackTickGap > frameDuration * 1.5) {
+                    console.warn(`[App] Playback Jitter: ${playbackTickGap.toFixed(2)}ms (expected ${frameDuration.toFixed(0)}ms)`);
+                }
+
+                lastTimeRef.current = now - (playbackTickGap % frameDuration);
                 animFrameRef.current += 1;
 
                 if (animFrameRef.current >= currentAnimation.duration) {
@@ -211,8 +230,16 @@ function App() {
                     }
                 }
 
-                setCurrentFrame(animFrameRef.current);
-                setPendingEdits(new Map());
+                // Update low-latency state
+                currentFrameRef.current = animFrameRef.current;
+                frameEmitter.current.dispatchEvent(new CustomEvent('frameChange', { detail: animFrameRef.current }));
+
+                // PERFORMANCE: batch state updates if needed, but not every frame
+                if (animFrameRef.current % 5 === 0) {
+                    _setCurrentFrame(animFrameRef.current);
+                }
+                
+                setPendingEdits(prev => prev.size > 0 ? new Map() : prev);
             }
             rafId = requestAnimationFrame(tick);
         };
@@ -339,6 +366,11 @@ function App() {
         setProjectData({ ...projectData });
     }, [selectedBone, selectedSlot, projectData, mode, isRecording, isPlaying, currentAnimation]);
 
+    const renderDuration = performance.now() - renderStartTime;
+    if (renderDuration > 15) {
+        console.warn(`[App] Heavy Render: ${renderDuration.toFixed(2)}ms`);
+    }
+
     return (
         <div className="flex flex-col h-screen bg-[#2c2c2c] text-[#e0e0e0] font-sans text-sm">
             <input
@@ -420,8 +452,10 @@ function App() {
                                 onSelectBone={handleSelectBone}
                                 onSelectSlot={handleSelectSlot}
                                 onDeselect={handleDeselect}
-                                currentAnimation={isPlaying || currentFrame > 0 ? currentAnimation : null}
-                                currentFrame={currentFrame}
+                                    currentAnimation={currentAnimation}
+                                    isPlaying={isPlaying}
+                                    currentFrame={currentFrame}
+                                    frameEmitter={frameEmitter.current}
                                 selectedTool={selectedTool}
                                 onTransformChange={handleTransformChange}
                             />
@@ -454,7 +488,9 @@ function App() {
                             selectedAnimIndex={selectedAnimIndex}
                             setSelectedAnimIndex={setSelectedAnimIndex}
                             currentFrame={currentFrame}
-                            setCurrentFrame={handleChangeFrame}
+                            currentFrameRef={currentFrameRef}
+                            frameEmitter={frameEmitter.current}
+                            setCurrentFrame={(f: number) => setCurrentFrame(f, true)}
                             isPlaying={isPlaying}
                             setIsPlaying={setIsPlaying}
                             isRecording={isRecording}

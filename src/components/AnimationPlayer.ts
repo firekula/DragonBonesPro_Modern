@@ -24,29 +24,37 @@ interface BoneAnimTransform {
 function bezierInterpolate(normalizedTime: number, curve: BezierCurve): number {
     const { cx1, cy1, cx2, cy2 } = curve;
 
-    // Cubic Bezier x(t) and y(t)
-    const bx = (t: number) => 3 * (1 - t) * (1 - t) * t * cx1 + 3 * (1 - t) * t * t * cx2 + t * t * t;
-    const by = (t: number) => 3 * (1 - t) * (1 - t) * t * cy1 + 3 * (1 - t) * t * t * cy2 + t * t * t;
+    // Cubic Bezier x(t) = 3*(1-t)^2*t*cx1 + 3*(1-t)*t^2*cx2 + t^3
+    const getBezierX = (t: number) => {
+        const mt = 1 - t;
+        return 3 * mt * mt * t * cx1 + 3 * mt * t * t * cx2 + t * t * t;
+    };
 
-    // Derivative dx/dt
-    const dbx = (t: number) => 3 * ((1 - t) * (1 - t) * cx1 + 2 * (1 - t) * t * (cx2 - cx1) + t * t * (1 - cx2));
+    const getBezierY = (t: number) => {
+        const mt = 1 - t;
+        const cy = 3 * mt * mt * t * cy1 + 3 * mt * t * t * cy2 + t * t * t;
+        return cy;
+    };
 
-    // Clamp edge cases
     if (normalizedTime <= 0) return 0;
     if (normalizedTime >= 1) return 1;
 
-    // Newton-Raphson to solve bx(t) = normalizedTime
-    let t = normalizedTime; // Initial guess
+    // Use binary search (bisection) for a robust result.
+    let lower = 0;
+    let upper = 1;
+    let t = 0.5;
+
     for (let i = 0; i < 12; i++) {
-        const x = bx(t) - normalizedTime;
-        const dx = dbx(t);
-        if (Math.abs(x) < 1e-6) break;
-        if (Math.abs(dx) < 1e-10) break;
-        t -= x / dx;
-        t = Math.max(0, Math.min(1, t));
+        const x = getBezierX(t);
+        if (x < normalizedTime) {
+            lower = t;
+        } else {
+            upper = t;
+        }
+        t = (lower + upper) / 2;
     }
 
-    return by(t);
+    return getBezierY(t);
 }
 
 /**
@@ -153,6 +161,10 @@ export function getAnimatedBoneTransforms(
     currentFrame: number,
 ): Map<string, BoneAnimTransform> {
     const result = new Map<string, BoneAnimTransform>();
+
+    if (animation.bone.length === 0) {
+        console.warn(`[AnimationPlayer] Animation ${animation.name} has no bone timelines`);
+    }
 
     for (const boneTimeline of animation.bone) {
         const animTransform = evaluateBoneTimeline(boneTimeline, currentFrame);

@@ -1,4 +1,4 @@
-import { useRef, useCallback, useState } from 'react';
+import React, { useRef, useCallback, useState, memo, useEffect } from 'react';
 import { Play, Pause, SkipBack, SkipForward, Circle, Save, X } from 'lucide-react';
 import type { AnimationData, BoneTimeline, BezierCurve } from '../DataModel';
 import type { SelectedInfo } from './PropertiesPanel';
@@ -9,6 +9,8 @@ interface TimelinePanelProps {
     selectedAnimIndex: number;
     setSelectedAnimIndex: (index: number) => void;
     currentFrame: number;
+    currentFrameRef?: React.MutableRefObject<number>;
+    frameEmitter?: EventTarget;
     setCurrentFrame: (frame: number) => void;
     isPlaying: boolean;
     setIsPlaying: (playing: boolean) => void;
@@ -20,7 +22,7 @@ interface TimelinePanelProps {
 }
 
 const ROW_HEIGHT = 28; // px height per bone row
-const FRAME_WIDTH = 14; // px width per frame column
+const DEFAULT_FRAME_WIDTH = 14; // default px width per frame column
 const LABEL_WIDTH = 160; // px width of bone label column
 
 /** Bezier curve mini-editor shown in a popover */
@@ -134,6 +136,8 @@ export function TimelinePanel({
     selectedAnimIndex,
     setSelectedAnimIndex,
     currentFrame,
+    currentFrameRef,
+    frameEmitter,
     setCurrentFrame,
     isPlaying,
     setIsPlaying,
@@ -153,6 +157,10 @@ export function TimelinePanel({
         if (from === 'track' && labelScrollRef.current) labelScrollRef.current.scrollTop = scrollTop;
     };
 
+    // Timeline horizontal zoom
+    const [timelineZoom, setTimelineZoom] = useState(1.0);
+    const frameWidth = DEFAULT_FRAME_WIDTH * timelineZoom;
+
     // Curve editor state
     const [curveEditorState, setCurveEditorState] = useState<{
         bt: BoneTimeline; type: 'translate' | 'rotate' | 'scale'; kfIndex: number;
@@ -161,6 +169,19 @@ export function TimelinePanel({
     const openCurveEditor = (bt: BoneTimeline, kf: KFInfo) => {
         setCurveEditorState({ bt, type: kf.type, kfIndex: kf.kfIndex });
     };
+
+    // Low-latency playhead sync
+    const playheadRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        if (!frameEmitter || !playheadRef.current) return;
+        const handler = (e: any) => {
+            if (playheadRef.current) {
+                playheadRef.current.style.left = `${e.detail * frameWidth}px`;
+            }
+        };
+        frameEmitter.addEventListener('frameChange', handler);
+        return () => frameEmitter.removeEventListener('frameChange', handler);
+    }, [frameEmitter, frameWidth]);
 
     const handleCurveChange = (newCurve: BezierCurve) => {
         if (!curveEditorState) return;
@@ -171,31 +192,8 @@ export function TimelinePanel({
         }
     };
 
-    /** Collect all keyframe positions for a bone timeline */
-    const getKeyframes = (bt: BoneTimeline): KFInfo[] => {
-        const kfs: KFInfo[] = [];
-        let pos = 0;
-        bt.translateFrame.forEach((kf, i) => {
-            kfs.push({ type: 'translate', kfIndex: i, framePos: pos, hasCurve: !!kf.curve, curve: kf.curve });
-            pos += kf.duration;
-        });
-        pos = 0;
-        bt.rotateFrame.forEach((kf, i) => {
-            kfs.push({ type: 'rotate', kfIndex: i, framePos: pos, hasCurve: !!kf.curve, curve: kf.curve });
-            pos += kf.duration;
-        });
-        pos = 0;
-        bt.scaleFrame.forEach((kf, i) => {
-            kfs.push({ type: 'scale', kfIndex: i, framePos: pos, hasCurve: !!kf.curve, curve: kf.curve });
-            pos += kf.duration;
-        });
-        return kfs;
-    };
-
-    const colorMap = { translate: '#3b82f6', rotate: '#22c55e', scale: '#f59e0b' };
-
     const totalFrames = currentAnimation?.duration || 0;
-    const trackWidth = totalFrames * FRAME_WIDTH;
+    const trackWidth = totalFrames * frameWidth;
 
     return (
         <div className="h-52 bg-[#2a2a2a] border-t border-[#1a1a1a] flex flex-col select-none">
@@ -214,6 +212,16 @@ export function TimelinePanel({
                             ))}
                         </select>
                     )}
+                    <div className="flex items-center gap-1 ml-4 bg-[#222] px-2 py-0.5 rounded border border-[#444]">
+                        <span className="text-[10px] text-gray-400">Zoom</span>
+                        <input
+                            type="range" min={0.5} max={5} step={0.1}
+                            value={timelineZoom}
+                            onChange={e => setTimelineZoom(parseFloat(e.target.value))}
+                            className="w-20 h-1 accent-blue-500 cursor-pointer"
+                        />
+                        <span className="text-[10px] text-gray-400 w-6">{timelineZoom.toFixed(1)}x</span>
+                    </div>
                 </div>
                 <div className="flex gap-1 items-center">
                     <button onClick={() => { setCurrentFrame(0); setIsPlaying(false); }} className="p-1 hover:bg-[#555] rounded" title="Reset">
@@ -233,7 +241,9 @@ export function TimelinePanel({
                         disabled={!selectedInfo || !currentAnimation} title="Set Keyframe">
                         <Save size={13} />
                     </button>
-                    <span className="text-[10px] text-gray-400 ml-1 tabular-nums">{currentFrame} / {totalFrames}</span>
+                    <span className="text-[10px] text-gray-400 ml-1 tabular-nums">
+                        {isPlaying ? (currentFrameRef?.current || 0) : currentFrame} / {totalFrames}
+                    </span>
                 </div>
             </div>
 
@@ -249,14 +259,12 @@ export function TimelinePanel({
                     {/* Header spacer matching frame ruler height */}
                     <div style={{ height: 20 }} className="border-b border-[#222] bg-[#2a2a2a] flex-shrink-0" />
                     {currentAnimation?.bone.map((bt, i) => (
-                        <div
-                            key={i}
-                            style={{ height: ROW_HEIGHT }}
-                            className={`flex items-center px-2 border-b border-[#222] text-xs truncate cursor-pointer hover:bg-[#3a3a3a] ${selectedInfo?.name === bt.name ? 'text-blue-400' : 'text-gray-300'}`}
-                            onClick={() => handleSelectBone(bt.name)}
-                        >
-                            {bt.name}
-                        </div>
+                        <BoneLabel 
+                            key={i} 
+                            name={bt.name} 
+                            isSelected={selectedInfo?.name === bt.name} 
+                            onClick={() => handleSelectBone(bt.name)} 
+                        />
                     ))}
                 </div>
 
@@ -266,74 +274,54 @@ export function TimelinePanel({
                     className="flex-1 overflow-auto"
                     onScroll={syncScroll('track')}
                 >
-                    <div style={{ width: Math.max(trackWidth, 400), position: 'relative' }}>
+                    <div style={{ width: Math.max(trackWidth + frameWidth, 400), position: 'relative', minHeight: '100%', minWidth: '100%' }}>
                         {/* Frame ruler */}
                         <div
-                            className="flex items-end bg-[#2a2a2a] border-b border-[#222] sticky top-0 z-10"
-                            style={{ height: 20 }}
+                            className="flex items-end bg-[#2a2a2a] border-b border-[#222] sticky top-0 z-30"
+                            style={{ 
+                                height: 20,
+                                backgroundImage: `linear-gradient(to right, #3a3a3a 1px, transparent 1px)`,
+                                backgroundSize: `${frameWidth}px 100%`
+                            }}
                             onClick={e => {
                                 const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
                                 const x = e.clientX - rect.left;
-                                const frame = Math.floor(x / FRAME_WIDTH);
+                                const frame = Math.floor(x / frameWidth);
                                 setCurrentFrame(Math.max(0, Math.min(totalFrames - 1, frame)));
                             }}
                         >
-                            {totalFrames > 0 && [...Array(totalFrames)].map((_, i) => (
-                                <div key={i} className="border-l border-[#3a3a3a] flex-shrink-0 relative"
-                                    style={{ width: FRAME_WIDTH, height: '100%' }}>
-                                    {i % 5 === 0 && (
-                                        <span className="absolute top-0.5 left-0.5 text-[8px] text-gray-500 select-none">{i}</span>
-                                    )}
+                            {/* Static frame markers (only every 5 frames to keep DOM light) */}
+                            {totalFrames > 0 && Array.from({ length: Math.ceil(totalFrames / 5) }).map((_, i) => (
+                                <div key={i*5} className="absolute h-2 border-l border-gray-600"
+                                    style={{ left: i * 5 * frameWidth }}>
+                                    <span className="absolute -top-3 left-0.5 text-[8px] text-gray-500">{i*5}</span>
                                 </div>
                             ))}
-                            {/* Playhead */}
-                            {totalFrames > 0 && (
-                                <div className="absolute top-0 bottom-0 w-[2px] bg-red-500 pointer-events-none z-20"
-                                    style={{ left: currentFrame * FRAME_WIDTH + FRAME_WIDTH / 2 - 1 }} />
-                            )}
                         </div>
 
+                        {/* Full-height vertical playhead overlay */}
+                        {totalFrames > 0 && (
+                            <div 
+                                ref={playheadRef}
+                                className="absolute top-0 bottom-0 w-[2px] bg-red-500 pointer-events-none z-20"
+                                style={{ left: currentFrame * frameWidth }} 
+                            />
+                        )}
+
                         {/* Bone track rows */}
-                        {currentAnimation?.bone.map((bt, i) => {
-                            const kfs = getKeyframes(bt);
-                            return (
-                                <div key={i} className="border-b border-[#1e1e1e] relative"
-                                    style={{ height: ROW_HEIGHT, background: i % 2 === 0 ? '#1c1c1c' : '#1e1e1e' }}>
-                                    {/* Frame grid lines */}
-                                    {[...Array(totalFrames)].map((_, fi) => (
-                                        <div key={fi} className="absolute top-0 bottom-0 border-l border-[#252525]"
-                                            style={{ left: fi * FRAME_WIDTH }} />
-                                    ))}
-                                    {/* Playhead */}
-                                    <div className="absolute top-0 bottom-0 w-[2px] bg-red-500/40 pointer-events-none z-10"
-                                        style={{ left: currentFrame * FRAME_WIDTH + FRAME_WIDTH / 2 - 1 }} />
-                                    {/* Keyframe diamonds */}
-                                    {kfs.map((kf, ki) => (
-                                        <div
-                                            key={ki}
-                                            className="absolute w-2.5 h-2.5 rotate-45 cursor-pointer hover:scale-150 transition-transform z-10"
-                                            style={{
-                                                background: colorMap[kf.type],
-                                                // Center on the frame column: frame * width + half width - half diamond
-                                                left: kf.framePos * FRAME_WIDTH + FRAME_WIDTH / 2 - 5,
-                                                top: ROW_HEIGHT / 2 - 5,
-                                                outline: kf.hasCurve ? '2px solid #facc15' : 'none',
-                                            }}
-                                            title={`${kf.type} @${kf.framePos}${kf.hasCurve ? ' [bezier]' : ''}`}
-                                            onContextMenu={e => {
-                                                e.preventDefault();
-                                                openCurveEditor(bt, kf);
-                                            }}
-                                            onClick={() => setCurrentFrame(kf.framePos)}
-                                        />
-                                    ))}
-                                </div>
-                            );
-                        })}
+                        {currentAnimation?.bone.map((bt, i) => (
+                            <BoneRow 
+                                key={i}
+                                index={i}
+                                bt={bt}
+                                frameWidth={frameWidth}
+                                onOpenCurveEditor={openCurveEditor}
+                                onSetFrame={setCurrentFrame}
+                            />
+                        ))}
                     </div>
                 </div>
             </div>
-
             {/* Curve editor popover */}
             {curveEditorState && (() => {
                 const { bt, type, kfIndex } = curveEditorState;
@@ -353,3 +341,58 @@ export function TimelinePanel({
         </div>
     );
 }
+
+const BoneLabel = memo(({ name, isSelected, onClick }: { name: string, isSelected: boolean, onClick: () => void }) => (
+    <div
+        style={{ height: ROW_HEIGHT }}
+        className={`flex items-center px-2 border-b border-[#222] text-xs truncate cursor-pointer hover:bg-[#3a3a3a] ${isSelected ? 'text-blue-400' : 'text-gray-300'}`}
+        onClick={onClick}
+    >
+        {name}
+    </div>
+));
+
+const BoneRow = memo(({ index, bt, frameWidth, onOpenCurveEditor, onSetFrame }: {
+    index: number, bt: BoneTimeline, frameWidth: number, onOpenCurveEditor: (bt: BoneTimeline, kf: KFInfo) => void, onSetFrame: (f: number) => void
+}) => {
+    const kfs = React.useMemo(() => {
+        const result: KFInfo[] = [];
+        let pos = 0;
+        bt.translateFrame.forEach((kf, i) => { result.push({ type: 'translate', kfIndex: i, framePos: pos, hasCurve: !!kf.curve, curve: kf.curve }); pos += kf.duration; });
+        pos = 0;
+        bt.rotateFrame.forEach((kf, i) => { result.push({ type: 'rotate', kfIndex: i, framePos: pos, hasCurve: !!kf.curve, curve: kf.curve }); pos += kf.duration; });
+        pos = 0;
+        bt.scaleFrame.forEach((kf, i) => { result.push({ type: 'scale', kfIndex: i, framePos: pos, hasCurve: !!kf.curve, curve: kf.curve }); pos += kf.duration; });
+        return result;
+    }, [bt]);
+
+    const colorMap = { translate: '#3b82f6', rotate: '#22c55e', scale: '#f59e0b' };
+
+    return (
+            <div className="border-b border-[#1e1e1e] relative min-w-full"
+            style={{ height: ROW_HEIGHT, background: index % 2 === 0 ? '#1c1c1c' : '#1e1e1e' }}>
+            {/* Grid rendered via CSS pattern for performance */}
+            <div className="absolute inset-0 pointer-events-none"
+                style={{
+                    backgroundImage: `linear-gradient(to right, #252525 1px, transparent 1px)`,
+                    backgroundSize: `${frameWidth}px 100%`
+                }}
+            />
+            {/* Keyframe diamonds */}
+            {kfs.map((kf, ki) => (
+                <div
+                    key={ki}
+                    className="absolute w-2.5 h-2.5 rotate-45 cursor-pointer hover:scale-150 transition-transform z-10"
+                    style={{
+                        background: colorMap[kf.type],
+                        left: kf.framePos * frameWidth - 5,
+                        top: ROW_HEIGHT / 2 - 5,
+                        outline: kf.hasCurve ? '2px solid #facc15' : 'none',
+                    }}
+                    onContextMenu={e => { e.preventDefault(); onOpenCurveEditor(bt, kf); }}
+                    onClick={() => onSetFrame(kf.framePos)}
+                />
+            ))}
+        </div>
+    );
+});

@@ -18,7 +18,9 @@ interface CanvasRendererProps {
     onSelectSlot?: (name: string) => void;
     onDeselect?: () => void;
     currentAnimation?: AnimationData | null;
+    isPlaying?: boolean;
     currentFrame?: number;
+    frameEmitter?: EventTarget;
     selectedTool?: 'move' | 'scale' | 'rotate';
     onTransformChange?: (field: string, value: number) => void;
 }
@@ -33,13 +35,21 @@ export function CanvasRenderer({
     onDeselect,
     selectedTool = 'move',
     currentAnimation,
+    isPlaying = false,
     currentFrame = 0,
+    frameEmitter,
     onTransformChange,
 }: CanvasRendererProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const pixiAppRef = useRef<PIXI.Application | null>(null);
     const rootContainerRef = useRef<PIXI.Container | null>(null);
     const [isAppReady, setIsAppReady] = useState(false);
+    const frameRef = useRef(currentFrame);
+
+    // Sync frameRef when prop changes (manual scrubbing)
+    useEffect(() => {
+        frameRef.current = currentFrame;
+    }, [currentFrame]);
 
     // Apply pan/zoom to root container
     const applyTransformRaw = useCallback((pan: {x: number, y: number}, zoom: number) => {
@@ -92,15 +102,35 @@ export function CanvasRenderer({
         });
         resizeObserver.observe(containerRef.current);
 
+        // Frame emitter subscription (use ref to avoid capturing stale updateRendering)
+        const handleFrameChange = (e: any) => {
+            frameRef.current = e.detail;
+            if (updateRenderingRef.current) {
+                updateRenderingRef.current();
+            } else {
+                console.warn("[CanvasRenderer] handleFrameChange: updateRenderingRef.current is missing");
+            }
+        };
+
+        if (frameEmitter) {
+            console.log("[CanvasRenderer] Subscribing to frameEmitter");
+            frameEmitter.addEventListener('frameChange', handleFrameChange);
+        } else {
+            console.warn("[CanvasRenderer] frameEmitter is missing in hook!");
+        }
+
         return () => {
             isMounted = false;
             resizeObserver.disconnect();
+            if (frameEmitter) {
+                frameEmitter.removeEventListener('frameChange', handleFrameChange);
+            }
             if (pixiAppRef.current) {
                 pixiAppRef.current.destroy(true, { children: true });
                 pixiAppRef.current = null;
             }
         };
-    }, [applyTransform]);
+    }, [applyTransform, frameEmitter]);
 
     // Pan zoom logic handled by usePanZoom hook
 
@@ -110,7 +140,7 @@ export function CanvasRenderer({
         boneLayer: null as PIXI.Container | null,
         boneGraphics: null as PIXI.Graphics | null,
         outlineLayer: null as PIXI.Container | null,
-        hoverGraphics: null as PIXI.Graphics | null, // always-on-top hover outline
+        hoverGraphics: null as PIXI.Container | null, // always-on-top hover outline
         slotSprites: new Map<string, PIXI.Sprite>(),
         boneJoints: new Map<string, PIXI.Graphics>(),
         armature: null as any,
@@ -119,6 +149,8 @@ export function CanvasRenderer({
         textureBlobUrl: null as string | null,
         imageSource: null as PIXI.ImageSource | null,
         alphaCtx: null as CanvasRenderingContext2D | null,
+        selectionG: null as PIXI.Graphics | null,
+        selectionContour: null as PIXI.Sprite | null,
     });
 
     // Keep armature reference in renderingRef in sync whenever projectData changes
@@ -127,8 +159,8 @@ export function CanvasRenderer({
         renderingRef.current.armature = projectData.armatures[selectedArmatureIndex];
     }, [projectData, selectedArmatureIndex]);
 
-    // (applyDeltaDirectly and handleToolDragEnd are defined after updateRendering below)
     // Refs to always-latest values, avoiding stale closures in drag callbacks
+    const isDraggingRef = useRef(false);
     const selectedBoneRef = useRef(selectedBone);
     const selectedSlotRef = useRef(selectedSlot);
     useEffect(() => { selectedBoneRef.current = selectedBone; }, [selectedBone]);
@@ -177,16 +209,23 @@ export function CanvasRenderer({
         const boneGraphics = new PIXI.Graphics();
         boneLayer.addChild(boneGraphics);
 
-        // Selection outline layer (on top of sprites, below bones)
-        const outlineLayer = new PIXI.Container();
-        rootContainer.addChild(outlineLayer);
-        // Re-add boneLayer on top
-        rootContainer.removeChild(boneLayer);
-        rootContainer.addChild(boneLayer);
-
         // Hover + selection outline Graphics (always topmost, drawn directly)
-        const hoverGraphics = new PIXI.Graphics();
+        const hoverGraphics = new PIXI.Container();
+        hoverGraphics.eventMode = 'none'; // Overlays shouldn't block
         rootContainer.addChild(hoverGraphics);
+
+        // Selection outline layer (contains tool handles, must be topmost and interactive)
+        const outlineLayer = new PIXI.Container();
+        outlineLayer.eventMode = 'passive'; // Pass through to children
+        rootContainer.addChild(outlineLayer);
+
+        // Persistent selection visuals
+        const selectionG = new PIXI.Graphics();
+        outlineLayer.addChild(selectionG);
+        const selectionContour = new PIXI.Sprite();
+        selectionContour.anchor.set(0.5, 0.5);
+        selectionContour.eventMode = 'none';
+        outlineLayer.addChild(selectionContour);
 
         // Build lookup: slotName -> SkinSlotData (from first skin)
         const skinSlotMap: Record<string, any> = {};
@@ -219,6 +258,8 @@ export function CanvasRenderer({
             textureBlobUrl: projectData.images['texture.png'],
             imageSource: null,
             alphaCtx: null,
+            selectionG,
+            selectionContour,
         };
 
         // Load the texture image and create sprites
@@ -283,40 +324,65 @@ export function CanvasRenderer({
 
                         // Hover outline: white dashed when hovering unselected sprites
                         sprite.on('pointerover', () => {
-                            const hg = renderingRef.current.hoverGraphics;
-                            if (!hg) return;
-                            hg.clear();
+                            const { hoverGraphics, armature, skinSlotMap, subTextureMap, alphaCtx } = renderingRef.current;
+                            const rc = rootContainerRef.current;
+                            if (!hoverGraphics || !rc || !alphaCtx || !armature || isDraggingRef.current) return;
+                            
+                            hoverGraphics.removeChildren();
+                            const dashG = new PIXI.Graphics();
+                            hoverGraphics.addChild(dashG);
+
                             const bounds = sprite.getLocalBounds();
-                            const mat = sprite.worldTransform;
-                            // Draw dashed white rectangle in world space using the sprite's transform
+                            
+                            // 1. Dash box
                             const corners = [
                                 [bounds.left, bounds.top], [bounds.right, bounds.top],
                                 [bounds.right, bounds.bottom], [bounds.left, bounds.bottom],
-                            ].map(([lx, ly]) => mat.apply({ x: lx, y: ly }));
-                            hg.setStrokeStyle({ width: 1.2 / (zoomRef.current || 1), color: 0xffffff, alpha: 0.75 });
-                            // Dash simulation
+                            ].map(([lx, ly]) => {
+                                const gp = sprite.toGlobal({ x: lx, y: ly });
+                                return rc.toLocal(gp);
+                            });
+
+                            dashG.setStrokeStyle({ width: 1.2 / (zoomRef.current || 1), color: 0xffffff, alpha: 0.6 });
                             const dashLen = 4 / (zoomRef.current || 1);
                             const gapLen = 3 / (zoomRef.current || 1);
                             for (let ci = 0; ci < corners.length; ci++) {
-                                const a = corners[ci];
-                                const b = corners[(ci + 1) % corners.length];
+                                const a = corners[ci], b = corners[(ci + 1) % corners.length];
                                 const dx = b.x - a.x, dy = b.y - a.y;
                                 const len = Math.sqrt(dx * dx + dy * dy);
                                 const ux = dx / len, uy = dy / len;
                                 let t = 0;
                                 while (t < len) {
-                                    const startX = a.x + ux * t, startY = a.y + uy * t;
                                     const endT = Math.min(t + dashLen, len);
-                                    const endX = a.x + ux * endT, endY = a.y + uy * endT;
-                                    hg.moveTo(startX, startY);
-                                    hg.lineTo(endX, endY);
+                                    dashG.moveTo(a.x + ux * t, a.y + uy * t);
+                                    dashG.lineTo(a.x + ux * endT, a.y + uy * endT);
                                     t += dashLen + gapLen;
                                 }
                             }
-                            hg.stroke();
+                            dashG.stroke();
+
+                            // 2. Pixel-perfect white contour
+                            const skinSlot = skinSlotMap[slot.name];
+                            if (skinSlot && skinSlot.displays) {
+                                const display = skinSlot.displays[slot.displayIndex] || skinSlot.displays[0];
+                                const subTex = subTextureMap[display.path];
+                                if (subTex) {
+                                    const contour = SelectionRenderer.createContourSprite(alphaCtx, subTex, 0xffffff, 0.7);
+                                    if (contour) {
+                                        // Standard way in modern PIXI:
+                                        const worldMat = sprite.worldTransform.clone();
+                                        const rcInverse = rc.worldTransform.clone().invert();
+                                        worldMat.prepend(rcInverse);
+                                        contour.setFromMatrix(worldMat);
+                                        contour.eventMode = 'none';
+                                        hoverGraphics.addChild(contour);
+                                    }
+                                }
+                            }
                         });
+
                         sprite.on('pointerout', () => {
-                            renderingRef.current.hoverGraphics?.clear();
+                            renderingRef.current.hoverGraphics?.removeChildren();
                         });
 
                         spriteLayer.addChild(sprite);
@@ -340,8 +406,12 @@ export function CanvasRenderer({
 
     }, [projectData, selectedArmatureIndex, isAppReady, applyTransform, onSelectSlot, onDeselect]);
 
+    // Performance profiling state
+    const perfRef = useRef({ lastFrameTime: 0, frameCount: 0, totalMs: 0 });
+
     // Helper function to update rendering without recreating the entire scene
     const updateRendering = useCallback(() => {
+        const startTime = performance.now();
         const { boneLayer, boneGraphics, outlineLayer, slotSprites, boneJoints, armature, skinSlotMap, subTextureMap, alphaCtx, hoverGraphics } = renderingRef.current;
         if (!armature || !boneGraphics) return;
 
@@ -353,9 +423,17 @@ export function CanvasRenderer({
         const DEG_TO_RAD = Math.PI / 180;
 
         // Get animation deltas for current frame
+        const currentF = frameRef.current;
         const animBoneMap = currentAnimation
-            ? getAnimatedBoneTransforms(currentAnimation, currentFrame)
+            ? getAnimatedBoneTransforms(currentAnimation, currentF)
             : null;
+        
+        if (currentF % 24 === 0) {
+            console.log(`[CanvasRenderer] Rendering f=${currentF}, anim=${currentAnimation?.name}, hasMap=${!!animBoneMap}`);
+        }
+        if (currentF % 24 === 0) { // Log occasionally to verify loop
+            console.log(`[CanvasRenderer] updateRendering: f=${currentF}, anim=${currentAnimation?.name}, isPlaying=${isPlaying}`);
+        }
 
         const getGlobalMatrix = (bone: any): PIXI.Matrix => {
             if (globalTransforms[bone.name]) return globalTransforms[bone.name];
@@ -406,9 +484,26 @@ export function CanvasRenderer({
         });
         boneJoints.clear();
 
-        // Clear existing outlines
+        // Use persistent selection visuals
+        const { selectionG, selectionContour } = renderingRef.current;
+        if (selectionG) selectionG.clear();
+        if (selectionContour) selectionContour.visible = false;
+
+        // Clear existing hover/tool handles (but keep persistent selection objects if we want them always there)
         if (outlineLayer) {
-            outlineLayer.removeChildren();
+            // We want to keep selectionG and selectionContour, and also tool handles might be children.
+            // ToolRenderer usually adds/removes children.
+            // A safer way is to ONLY remove ToolRenderer children or let it manage them.
+            // For now, let's just ensure we don't remove our persistent ones.
+            const persistent = [selectionG, selectionContour];
+            outlineLayer.children.forEach(c => {
+                if (!persistent.includes(c as any) && !(c instanceof PIXI.Container && c.children.length > 0)) {
+                    // This is still a bit fuzzy, maybe we should just clear everything except persistent
+                }
+            });
+            // Actually, let's just clear outlineLayer children that are NOT persistent
+            const toRemove = outlineLayer.children.filter(c => !persistent.includes(c as any));
+            toRemove.forEach(c => outlineLayer.removeChild(c));
         }
 
         // Draw edit tool controls if something is selected
@@ -465,25 +560,49 @@ export function CanvasRenderer({
                         const arrowSize = 6 / zoom;
 
                     // Clear hover outline when something is selected
-                    hoverGraphics?.clear();
+                    hoverGraphics?.removeChildren();
 
-                    // Blue solid selection outline for selected slot sprite
-                    if (selectedSlot) {
+                    // Blue solid selection outline and contour for selected slot sprite
+                    if (selectedSlot && selectionG && selectionContour) {
                         const selSprite = slotSprites?.get(selectedSlot);
-                        if (selSprite) {
-                            const selBounds = selSprite.getLocalBounds();
-                            const selMat = selSprite.worldTransform;
-                            const selCorners = [
-                                [selBounds.left, selBounds.top], [selBounds.right, selBounds.top],
-                                [selBounds.right, selBounds.bottom], [selBounds.left, selBounds.bottom],
-                            ].map(([lx, ly]) => selMat.apply({ x: lx, y: ly }));
-                            const selG = new PIXI.Graphics();
-                            selG.setStrokeStyle({ width: 1.5 / zoom, color: 0x4a9eff, alpha: 1 });
-                            selG.moveTo(selCorners[0].x, selCorners[0].y);
-                            selCorners.slice(1).forEach(c => selG.lineTo(c.x, c.y));
-                            selG.lineTo(selCorners[0].x, selCorners[0].y);
-                            selG.stroke();
-                            outlineLayer.addChild(selG);
+                        const rc = rootContainerRef.current;
+                        if (selSprite && rc && alphaCtx) {
+                            const bounds = selSprite.getLocalBounds();
+                            
+                            // Calculate corners directly from displayMatrix to avoid worldTransform lag
+                            const corners = [
+                                { x: bounds.left, y: bounds.top },
+                                { x: bounds.right, y: bounds.top },
+                                { x: bounds.right, y: bounds.bottom },
+                                { x: bounds.left, y: bounds.bottom },
+                            ].map(p => {
+                                const out = { x: 0, y: 0 };
+                                targetMatrix!.apply(p, out);
+                                return out;
+                            });
+                            
+                            selectionG.setStrokeStyle({ width: 1.5 / zoom, color: 0x4a9eff, alpha: 1 });
+                            selectionG.moveTo(corners[0].x, corners[0].y);
+                            for (let i = 1; i < corners.length; i++) selectionG.lineTo(corners[i].x, corners[i].y);
+                            selectionG.lineTo(corners[0].x, corners[0].y);
+                            selectionG.stroke();
+
+                            // Pixel-perfect blue contour
+                            const skinSlot = skinSlotMap[selectedSlot];
+                            const slot = armature.slots.find((s: any) => s.name === selectedSlot);
+                            if (skinSlot && slot) {
+                                const display = skinSlot.displays[slot.displayIndex] || skinSlot.displays[0];
+                                const subTex = subTextureMap[display.path];
+                                if (subTex) {
+                                    const texture = SelectionRenderer.getContourTexture(alphaCtx, subTex, 0x4a9eff, 0.8);
+                                    if (texture) {
+                                        selectionContour.texture = texture;
+                                        selectionContour.visible = true;
+                                        // targetMatrix IS the local-to-rootContainer transform
+                                        selectionContour.setFromMatrix(targetMatrix!);
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -530,15 +649,7 @@ export function CanvasRenderer({
             displayMatrix.prepend(boneMatrix);
             sprite.setFromMatrix(displayMatrix);
 
-            // Update selection visuals
-            if (selectedSlot === slot.name && outlineLayer && alphaCtx) {
-                const subTex = subTextureMap[display.path];
-                if (subTex) {
-                    SelectionRenderer.drawSlotSelection(
-                        outlineLayer, alphaCtx, displayMatrix, subTex, zoomRef.current
-                    );
-                }
-            }
+            // Old SelectionRenderer removed — replaced by hoverGraphics / outlineLayer blue rect
         });
 
         // Draw bone wireframes with click-to-select on joints
@@ -552,8 +663,34 @@ export function CanvasRenderer({
             zoomRef.current,
             onSelectBone
         );
+
+        // Profiling
+        const endTime = performance.now();
+        const duration = endTime - startTime;
+        perfRef.current.totalMs += duration;
+        perfRef.current.frameCount++;
+        if (duration > 12) {
+            console.warn(`[CanvasRenderer] Heavy Frame: ${duration.toFixed(2)}ms (Selected: ${selectedBone || selectedSlot || 'None'})`);
+        }
+        if (perfRef.current.frameCount >= 60) {
+            const avg = perfRef.current.totalMs / perfRef.current.frameCount;
+            console.log(`[CanvasRenderer] Avg Render Time (60f): ${avg.toFixed(2)}ms (Selected: ${selectedBone || selectedSlot || 'None'})`);
+            perfRef.current.frameCount = 0;
+            perfRef.current.totalMs = 0;
+        }
+
+        // Detect frame pacing issues
+        const now = performance.now();
+        if (perfRef.current.lastFrameTime > 0) {
+            const gap = now - perfRef.current.lastFrameTime;
+            if (gap > 35) { // Gap > 35ms (~30fps)
+                console.warn(`[CanvasRenderer] Stutter detected: ${gap.toFixed(2)}ms since last update`);
+            }
+        }
+        perfRef.current.lastFrameTime = now;
+
     // projectData changes trigger re-render since armature ref is updated above
-    }, [currentAnimation, currentFrame, selectedBone, selectedSlot, selectedTool, onSelectBone, onTransformChange]);
+    }, [currentAnimation, isPlaying, selectedBone, selectedSlot, selectedTool, onSelectBone, onTransformChange]);
     const updateRenderingRef = useRef(updateRendering);
     useEffect(() => { updateRenderingRef.current = updateRendering; }, [updateRendering]);
 
@@ -562,8 +699,18 @@ export function CanvasRenderer({
      * Does NOT touch outlineLayer (tool controls), so control points stay visible during drag.
      */
     const updateBonesAndSprites = useCallback(() => {
-        const { boneLayer, boneGraphics, slotSprites, boneJoints, armature, skinSlotMap } = renderingRef.current;
+        const { boneLayer, boneGraphics, slotSprites, boneJoints, armature, skinSlotMap, outlineLayer, hoverGraphics, alphaCtx, subTextureMap } = renderingRef.current;
         if (!armature || !boneGraphics) return;
+
+        // Ensure hover is cleared during drag
+        hoverGraphics?.removeChildren();
+
+        // Use persistent selection visuals
+        const { selectionG, selectionContour } = renderingRef.current;
+        if (selectionG) selectionG.clear();
+        if (selectionContour) selectionContour.visible = false;
+        
+        // No need to clear outlineLayer here if we only update persistent visuals
 
         const findBone = (name: string) => armature.bones.find((b: any) => b.name === name);
         const globalTransforms: Record<string, PIXI.Matrix> = {};
@@ -626,6 +773,49 @@ export function CanvasRenderer({
             displayMatrix.ty = displayTransform.y;
             displayMatrix.prepend(boneMatrix);
             sprite.setFromMatrix(displayMatrix);
+
+            // Update selection visuals if this is the selected slot
+            const selSlot = selectedSlotRef.current;
+            const zoom = zoomRef.current;
+            if (slot.name === selSlot && outlineLayer && alphaCtx && selectionG && selectionContour) {
+                const rc = rootContainerRef.current;
+                if (rc) {
+                    const bounds = sprite.getLocalBounds();
+                    
+                    // Calculate corners directly from displayMatrix to avoid worldTransform lag
+                    const corners = [
+                        { x: bounds.left, y: bounds.top },
+                        { x: bounds.right, y: bounds.top },
+                        { x: bounds.right, y: bounds.bottom },
+                        { x: bounds.left, y: bounds.bottom },
+                    ].map(p => {
+                        const out = { x: 0, y: 0 };
+                        displayMatrix.apply(p, out);
+                        return out;
+                    });
+                    
+                    selectionG.setStrokeStyle({ width: 1.5 / zoom, color: 0x4a9eff, alpha: 1 });
+                    selectionG.moveTo(corners[0].x, corners[0].y);
+                    for (let i = 1; i < corners.length; i++) selectionG.lineTo(corners[i].x, corners[i].y);
+                    selectionG.lineTo(corners[0].x, corners[0].y);
+                    selectionG.stroke();
+
+                    const skinSlot = skinSlotMap[slot.name];
+                    if (skinSlot) {
+                        const display = skinSlot.displays[slot.displayIndex] || skinSlot.displays[0];
+                        const subTex = subTextureMap[display.path];
+                        if (subTex) {
+                            const texture = SelectionRenderer.getContourTexture(alphaCtx, subTex, 0x4a9eff, 0.8);
+                            if (texture) {
+                                selectionContour.texture = texture;
+                                selectionContour.visible = true;
+                                // displayMatrix IS the local-to-rootContainer transform
+                                selectionContour.setFromMatrix(displayMatrix);
+                            }
+                        }
+                    }
+                }
+            }
         });
 
         // Draw bone wireframes
@@ -633,7 +823,7 @@ export function CanvasRenderer({
             armature, getGlobalMatrix, boneGraphics, boneLayer,
             boneJoints, selectedBone, zoomRef.current, onSelectBone
         );
-    }, [currentAnimation, currentFrame, selectedBone, onSelectBone]);
+    }, [currentAnimation, currentFrame, selectedBone, selectedSlot, onSelectBone]);
     const updateBonesAndSpritesRef = useRef(updateBonesAndSprites);
     useEffect(() => { updateBonesAndSpritesRef.current = updateBonesAndSprites; }, [updateBonesAndSprites]);
 
@@ -703,12 +893,14 @@ export function CanvasRenderer({
     }, [zoomRef, updateBonesAndSprites]);
 
     const handleToolTransformChange = useCallback((field: string, canvasPixelDelta: number) => {
+        isDraggingRef.current = true;
         applyDeltaDirectly(field, canvasPixelDelta);
     }, [applyDeltaDirectly]);
     const handleToolTransformChangeRef = useRef(handleToolTransformChange);
     useEffect(() => { handleToolTransformChangeRef.current = handleToolTransformChange; }, [handleToolTransformChange]);
 
     const handleToolDragEnd = useCallback(() => {
+        isDraggingRef.current = false;
         updateRenderingRef.current();
         if (onTransformChangeRef.current) onTransformChangeRef.current('commit', 0);
     }, []);
@@ -719,7 +911,7 @@ export function CanvasRenderer({
     useEffect(() => {
         const rafId = requestAnimationFrame(() => updateRendering());
         return () => cancelAnimationFrame(rafId);
-    }, [currentAnimation, currentFrame, selectedBone, selectedSlot, selectedTool, onSelectBone, updateRendering]);
+    }, [currentAnimation, selectedBone, selectedSlot, selectedTool, updateRendering]);
 
 
     return (

@@ -11,17 +11,13 @@ export class BoneRenderer {
         zoom: number,
         onSelectBone: ((name: string) => void) | undefined,
     ) {
-        // Clear existing joints first
-        boneJoints.forEach((joint) => {
-            if (joint.parent) {
-                joint.parent.removeChild(joint);
-            }
-        });
-        boneJoints.clear();
-
         if (!armature?.bones) return;
 
+        // Trace of seen bones to remove leftover joints
+        const seenBones = new Set<string>();
+
         armature.bones.forEach((bone: any) => {
+            seenBones.add(bone.name);
             const matrix = getGlobalMatrix(bone);
             const startX = matrix.tx;
             const startY = matrix.ty;
@@ -31,32 +27,46 @@ export class BoneRenderer {
 
             const isSelected = selectedBone === bone.name;
             const boneColor = isSelected ? 0xffffff : bone.color || 0x00ffff;
-            const boneWidth = (isSelected ? 3 : 2) / zoom; // Zoom-independent
+            const boneWidth = (isSelected ? 3 : 2) / zoom;
             const boneAlpha = isSelected ? 1.0 : 0.8;
 
             boneGraphics.moveTo(startX, startY);
             boneGraphics.lineTo(endX, endY);
             boneGraphics.stroke({ width: boneWidth, color: boneColor, alpha: boneAlpha });
 
-            const jointSize = (isSelected ? 6 : 4) / zoom; // Zoom-independent
+            const jointSize = (isSelected ? 6 : 4) / zoom;
             boneGraphics.circle(startX, startY, jointSize);
             boneGraphics.fill({ color: isSelected ? 0xff4400 : 0xffaa00, alpha: boneAlpha });
 
-            // Clickable joint circle for bone selection
-            const joint = new PIXI.Graphics();
-            joint.circle(startX, startY, 8);
-            joint.fill({ color: 0x000000, alpha: 0.01 }); // Nearly invisible hit area
-            joint.eventMode = "static";
-            joint.cursor = "pointer";
-            joint.on("pointerdown", (e: PIXI.FederatedPointerEvent) => {
-                if (e.button === 0 && onSelectBone) {
-                    onSelectBone(bone.name);
-                    e.stopPropagation();
+            // Reuse or create clickable joint circle
+            let joint = boneJoints.get(bone.name);
+            if (!joint) {
+                joint = new PIXI.Graphics();
+                joint.eventMode = "static";
+                joint.cursor = "pointer";
+                joint.on("pointerdown", (e: PIXI.FederatedPointerEvent) => {
+                    if (e.button === 0 && onSelectBone) {
+                        onSelectBone(bone.name);
+                        e.stopPropagation();
+                    }
+                });
+                if (boneLayer) {
+                    boneLayer.addChild(joint);
+                    boneJoints.set(bone.name, joint);
                 }
-            });
-            if (boneLayer) {
-                boneLayer.addChild(joint);
-                boneJoints.set(bone.name, joint);
+            }
+
+            // Update joint hit area position
+            joint.clear();
+            joint.circle(startX, startY, 10 / zoom); // Zoom-adjusted hit area
+            joint.fill({ color: 0x000000, alpha: 0.01 });
+        });
+
+        // Cleanup stale joints
+        boneJoints.forEach((joint, name) => {
+            if (!seenBones.has(name)) {
+                if (joint.parent) joint.parent.removeChild(joint);
+                boneJoints.delete(name);
             }
         });
     }
