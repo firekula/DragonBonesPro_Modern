@@ -162,13 +162,16 @@ export function getAnimatedBoneTransforms(
 ): Map<string, BoneAnimTransform> {
     const result = new Map<string, BoneAnimTransform>();
 
-    if (animation.bone.length === 0) {
-        console.warn(`[AnimationPlayer] Animation ${animation.name} has no bone timelines`);
+    const baseLayer = animation.layers.find(layer => layer.visible);
+    if (!baseLayer || baseLayer.bone.length === 0) {
+        console.warn(`[AnimationPlayer] Animation ${animation.name} has no visible bone timelines`);
     }
 
-    for (const boneTimeline of animation.bone) {
-        const animTransform = evaluateBoneTimeline(boneTimeline, currentFrame);
-        result.set(boneTimeline.name, animTransform);
+    if (baseLayer) {
+        for (const boneTimeline of baseLayer.bone) {
+            const animTransform = evaluateBoneTimeline(boneTimeline, currentFrame);
+            result.set(boneTimeline.name, animTransform);
+        }
     }
 
     return result;

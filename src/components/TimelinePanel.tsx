@@ -18,6 +18,7 @@ interface TimelinePanelProps {
     handleRecordToggle: () => void;
     selectedInfo: SelectedInfo | null;
     handleSetKeyframe: () => void;
+    handleDeleteKeyframe: (bt: BoneTimeline, kf: KFInfo) => void;
     handleSelectBone: (name: string) => void;
 }
 
@@ -36,6 +37,9 @@ function CurveEditor({ curve, onChange, onClose }: {
         { label: 'CP1 X', key: 'cx1' }, { label: 'CP1 Y', key: 'cy1' },
         { label: 'CP2 X', key: 'cx2' }, { label: 'CP2 Y', key: 'cy2' },
     ];
+
+    // Canvas interaction state
+    const [draggingPoint, setDraggingPoint] = useState<0 | 1 | null>(null);
 
     // Draw curve preview in a small canvas
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -73,16 +77,72 @@ function CurveEditor({ curve, onChange, onClose }: {
         );
         ctx.stroke();
         // Control points
-        [[curve.cx1 * W, (1 - curve.cy1) * H], [curve.cx2 * W, (1 - curve.cy2) * H]].forEach(([x, y]) => {
-            ctx.fillStyle = '#facc15';
+        [[curve.cx1 * W, (1 - curve.cy1) * H], [curve.cx2 * W, (1 - curve.cy2) * H]].forEach(([x, y], index) => {
+            ctx.fillStyle = draggingPoint === index ? '#f97316' : '#facc15';
             ctx.beginPath();
-            ctx.arc(x, y, 4, 0, Math.PI * 2);
+            ctx.arc(x, y, 6, 0, Math.PI * 2);
             ctx.fill();
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 1;
+            ctx.stroke();
         });
-    }, [curve]);
+    }, [curve, draggingPoint]);
 
     // Draw whenever curve or ref changes
     useCallback(() => { drawPreview(); }, [drawPreview])();
+
+    // Handle canvas mouse events for dragging control points
+    const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const W = canvas.width, H = canvas.height;
+        
+        // Check if clicked on a control point
+        const points = [
+            { x: curve.cx1 * W, y: (1 - curve.cy1) * H },
+            { x: curve.cx2 * W, y: (1 - curve.cy2) * H }
+        ];
+        
+        for (let i = 0; i < points.length; i++) {
+            const dx = x - points[i].x;
+            const dy = y - points[i].y;
+            if (Math.sqrt(dx * dx + dy * dy) <= 8) {
+                setDraggingPoint(i as 0 | 1);
+                break;
+            }
+        }
+    };
+
+    const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+        if (draggingPoint === null) return;
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const W = canvas.width, H = canvas.height;
+        
+        // Clamp values between 0 and 1
+        const newX = Math.max(0, Math.min(1, x / W));
+        const newY = Math.max(0, Math.min(1, 1 - (y / H)));
+        
+        if (draggingPoint === 0) {
+            onChange({ ...curve, cx1: newX, cy1: newY });
+        } else {
+            onChange({ ...curve, cx2: newX, cy2: newY });
+        }
+    };
+
+    const handleCanvasMouseUp = () => {
+        setDraggingPoint(null);
+    };
+
+    const handleCanvasMouseLeave = () => {
+        setDraggingPoint(null);
+    };
 
     return (
         <div className="absolute z-50 bottom-full mb-1 right-0 bg-[#282828] border border-[#444] rounded shadow-xl p-3 w-64">
@@ -94,21 +154,31 @@ function CurveEditor({ curve, onChange, onClose }: {
             <canvas
                 ref={r => { (canvasRef as any).current = r; if (r) { drawPreview(); } }}
                 width={220} height={80}
-                className="w-full rounded mb-2 border border-[#333]"
+                className="w-full rounded mb-2 border border-[#333] cursor-crosshair"
+                onMouseDown={handleCanvasMouseDown}
+                onMouseMove={handleCanvasMouseMove}
+                onMouseUp={handleCanvasMouseUp}
+                onMouseLeave={handleCanvasMouseLeave}
             />
             {/* Presets */}
             <div className="flex gap-1 mb-2 flex-wrap">
-                {[
-                    { label: 'Linear', c: { cx1: 0, cy1: 0, cx2: 1, cy2: 1 } },
-                    { label: 'Ease In', c: { cx1: 0.42, cy1: 0, cx2: 1, cy2: 1 } },
-                    { label: 'Ease Out', c: { cx1: 0, cy1: 0, cx2: 0.58, cy2: 1 } },
-                    { label: 'Ease', c: { cx1: 0.25, cy1: 0.1, cx2: 0.25, cy2: 1 } },
-                ].map(({ label, c }) => (
-                    <button key={label} onClick={() => onChange(c)}
-                        className="text-[9px] px-1.5 py-0.5 bg-[#333] hover:bg-blue-700 rounded">
-                        {label}
-                    </button>
-                ))}
+                {
+                    [
+                        { label: 'Linear', c: { cx1: 0, cy1: 0, cx2: 1, cy2: 1 } },
+                        { label: 'Ease In', c: { cx1: 0.42, cy1: 0, cx2: 1, cy2: 1 } },
+                        { label: 'Ease Out', c: { cx1: 0, cy1: 0, cx2: 0.58, cy2: 1 } },
+                        { label: 'Ease', c: { cx1: 0.25, cy1: 0.1, cx2: 0.25, cy2: 1 } },
+                        { label: 'Ease In Out', c: { cx1: 0.42, cy1: 0, cx2: 0.58, cy2: 1 } },
+                        { label: 'Elastic', c: { cx1: 0.68, cy1: -0.6, cx2: 0.34, cy2: 1.6 } },
+                        { label: 'Bounce', c: { cx1: 0.68, cy1: 1.55, cx2: 0.26, cy2: 1 } },
+                        { label: 'Back', c: { cx1: 0.17, cy1: -0.4, cx2: 0.88, cy2: 1.4 } },
+                    ].map(({ label, c }) => (
+                        <button key={label} onClick={() => onChange(c)}
+                            className="text-[9px] px-1.5 py-0.5 bg-[#333] hover:bg-blue-700 rounded">
+                            {label}
+                        </button>
+                    ))
+                }
             </div>
             {/* Numeric fields */}
             <div className="grid grid-cols-2 gap-1.5">
@@ -145,6 +215,7 @@ export function TimelinePanel({
     handleRecordToggle,
     selectedInfo,
     handleSetKeyframe,
+    handleDeleteKeyframe,
     handleSelectBone,
 }: TimelinePanelProps) {
     // Synchronized scrolling between bone list and track area
@@ -196,7 +267,7 @@ export function TimelinePanel({
     const trackWidth = totalFrames * frameWidth;
 
     return (
-        <div className="h-52 bg-[#2a2a2a] border-t border-[#1a1a1a] flex flex-col select-none">
+        <div className={`h-52 bg-[#2a2a2a] border-t flex flex-col select-none transition-colors duration-300 ${isRecording ? 'border-red-600/80 shadow-[0_0_10px_rgba(220,38,38,0.2)]' : 'border-[#1a1a1a]'}`}>
             {/* Toolbar */}
             <div className="flex items-center justify-between px-2 py-1 bg-[#383838] border-b border-[#222] flex-shrink-0">
                 <div className="flex items-center gap-2">
@@ -241,6 +312,28 @@ export function TimelinePanel({
                         disabled={!selectedInfo || !currentAnimation} title="Set Keyframe">
                         <Save size={13} />
                     </button>
+                    {currentAnimation && (
+                        <div className="ml-2 flex items-center gap-1 bg-[#222] px-2 py-0.5 rounded border border-[#444]">
+                            <span className="text-[10px] text-gray-400">Loop:</span>
+                            <select
+                                className="bg-[#1a1a1a] text-white text-xs border border-[#444] rounded px-1 py-0.5 outline-none w-20"
+                                value={currentAnimation.playTimes === 0 ? 'loop' : currentAnimation.playTimes.toString()}
+                                onChange={(e) => {
+                                    if (e.target.value === 'loop') {
+                                        currentAnimation.playTimes = 0;
+                                    } else {
+                                        currentAnimation.playTimes = parseInt(e.target.value) || 1;
+                                    }
+                                }}
+                            >
+                                <option value="loop">Loop</option>
+                                <option value="1">1x</option>
+                                <option value="2">2x</option>
+                                <option value="3">3x</option>
+                                <option value="5">5x</option>
+                            </select>
+                        </div>
+                    )}
                     <span className="text-[10px] text-gray-400 ml-1 tabular-nums">
                         {isPlaying ? (currentFrameRef?.current || 0) : currentFrame} / {totalFrames}
                     </span>
@@ -258,7 +351,7 @@ export function TimelinePanel({
                 >
                     {/* Header spacer matching frame ruler height */}
                     <div style={{ height: 20 }} className="border-b border-[#222] bg-[#2a2a2a] flex-shrink-0" />
-                    {currentAnimation?.bone.map((bt, i) => (
+                    {currentAnimation?.layers[0]?.bone.map((bt: any, i: number) => (
                         <BoneLabel 
                             key={i} 
                             name={bt.name} 
@@ -308,16 +401,159 @@ export function TimelinePanel({
                             />
                         )}
 
-                        {/* Bone track rows */}
-                        {currentAnimation?.bone.map((bt, i) => (
-                            <BoneRow 
-                                key={i}
-                                index={i}
-                                bt={bt}
-                                frameWidth={frameWidth}
-                                onOpenCurveEditor={openCurveEditor}
-                                onSetFrame={setCurrentFrame}
-                            />
+                        {/* Animation clips */}
+                        {currentAnimation && (
+                            <div className="border-b border-[#2a2a2a]">
+                                {/* Clips header */}
+                                <div className="flex items-center px-2 py-1 bg-[#2a2a2a] border-b border-[#1a1a1a]">
+                                    <span className="font-semibold text-xs mr-2">动画片段</span>
+                                    <button
+                                        onClick={() => {
+                                            // Add new clip
+                                            if (currentAnimation) {
+                                                currentAnimation.clips.push({
+                                                    name: `Clip ${currentAnimation.clips.length + 1}`,
+                                                    startTime: 0,
+                                                    endTime: currentAnimation.duration - 1,
+                                                    loop: false
+                                                });
+                                            }
+                                        }}
+                                        className="p-1 hover:bg-[#555] rounded ml-1"
+                                        title="Add Clip"
+                                    >
+                                        +
+                                    </button>
+                                </div>
+                                {/* Clips list */}
+                                {currentAnimation.clips.map((clip, clipIndex) => (
+                                    <div key={clipIndex} className="flex items-center px-4 py-1 border-b border-[#1e1e1e]">
+                                        <input
+                                            type="text"
+                                            value={clip.name}
+                                            onChange={(e) => {
+                                                clip.name = e.target.value;
+                                            }}
+                                            className="bg-[#1a1a1a] border border-[#444] rounded px-1 py-0.5 text-xs outline-none focus:border-blue-500 flex-1 mr-2"
+                                        />
+                                        <div className="flex items-center gap-2 text-xs">
+                                            <span>Start:</span>
+                                            <input
+                                                type="number"
+                                                value={clip.startTime}
+                                                onChange={(e) => {
+                                                    clip.startTime = parseInt(e.target.value) || 0;
+                                                    clip.startTime = Math.max(0, Math.min(clip.startTime, clip.endTime - 1));
+                                                }}
+                                                className="bg-[#1a1a1a] border border-[#444] rounded px-1 py-0.5 text-xs outline-none focus:border-blue-500 w-12"
+                                            />
+                                            <span>End:</span>
+                                            <input
+                                                type="number"
+                                                value={clip.endTime}
+                                                onChange={(e) => {
+                                                    clip.endTime = parseInt(e.target.value) || 0;
+                                                    clip.endTime = Math.max(clip.startTime + 1, Math.min(clip.endTime, currentAnimation.duration - 1));
+                                                }}
+                                                className="bg-[#1a1a1a] border border-[#444] rounded px-1 py-0.5 text-xs outline-none focus:border-blue-500 w-12"
+                                            />
+                                            <input
+                                                type="checkbox"
+                                                checked={clip.loop}
+                                                onChange={(e) => {
+                                                    clip.loop = e.target.checked;
+                                                }}
+                                                className="h-3 w-3"
+                                                title="Loop"
+                                            />
+                                            <button
+                                                onClick={() => {
+                                                    // Preview clip
+                                                    setCurrentFrame(clip.startTime);
+                                                    // TODO: Play only the clip range
+                                                }}
+                                                className="p-1 hover:bg-[#555] rounded"
+                                                title="Preview"
+                                            >
+                                                ▶
+                                            </button>
+                                            <button
+                                                onClick={() => {
+                                                    // Delete clip
+                                                    currentAnimation.clips.splice(clipIndex, 1);
+                                                }}
+                                                className="p-1 hover:bg-[#555] rounded text-red-400"
+                                                title="Delete"
+                                            >
+                                                -
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Layer rows */}
+                        {currentAnimation?.layers.map((layer, layerIndex) => (
+                            <div key={layerIndex} className="border-b border-[#2a2a2a]">
+                                {/* Layer header */}
+                                <div className="flex items-center px-2 py-1 bg-[#2a2a2a] border-b border-[#1a1a1a]">
+                                    <input
+                                        type="checkbox"
+                                        checked={layer.visible}
+                                        onChange={(e) => {
+                                            layer.visible = e.target.checked;
+                                        }}
+                                        className="mr-2 h-3 w-3"
+                                    />
+                                    <input
+                                        type="text"
+                                        value={layer.name}
+                                        onChange={(e) => {
+                                            layer.name = e.target.value;
+                                        }}
+                                        className="bg-[#1a1a1a] border border-[#444] rounded px-1 py-0.5 text-xs outline-none focus:border-blue-500 flex-1"
+                                    />
+                                    <button
+                                        onClick={() => {
+                                            // Add new layer
+                                            currentAnimation?.layers.push({
+                                                name: `Layer ${currentAnimation.layers.length + 1}`,
+                                                visible: true,
+                                                bone: []
+                                            });
+                                        }}
+                                        className="p-1 hover:bg-[#555] rounded ml-1"
+                                        title="Add Layer"
+                                    >
+                                        +
+                                    </button>
+                                    {currentAnimation?.layers.length > 1 && (
+                                        <button
+                                            onClick={() => {
+                                                // Delete layer
+                                                currentAnimation?.layers.splice(layerIndex, 1);
+                                            }}
+                                            className="p-1 hover:bg-[#555] rounded ml-1 text-red-400"
+                                            title="Delete Layer"
+                                        >
+                                            -
+                                        </button>
+                                    )}
+                                </div>
+                                {/* Bone tracks for this layer */}
+                                {layer.bone.map((bt, boneIndex) => (
+                                    <BoneRow 
+                                        key={boneIndex}
+                                        index={boneIndex}
+                                        bt={bt}
+                                        frameWidth={frameWidth}
+                                        onOpenCurveEditor={openCurveEditor}
+                                        onSetFrame={setCurrentFrame}
+                                        onDeleteKeyframe={handleDeleteKeyframe}
+                                    />
+                                ))}
+                            </div>
                         ))}
                     </div>
                 </div>
@@ -352,8 +588,13 @@ const BoneLabel = memo(({ name, isSelected, onClick }: { name: string, isSelecte
     </div>
 ));
 
-const BoneRow = memo(({ index, bt, frameWidth, onOpenCurveEditor, onSetFrame }: {
-    index: number, bt: BoneTimeline, frameWidth: number, onOpenCurveEditor: (bt: BoneTimeline, kf: KFInfo) => void, onSetFrame: (f: number) => void
+const BoneRow = memo(({ index, bt, frameWidth, onOpenCurveEditor, onSetFrame, onDeleteKeyframe }: {
+    index: number, 
+    bt: BoneTimeline, 
+    frameWidth: number, 
+    onOpenCurveEditor: (bt: BoneTimeline, kf: KFInfo) => void, 
+    onSetFrame: (f: number) => void,
+    onDeleteKeyframe: (bt: BoneTimeline, kf: KFInfo) => void
 }) => {
     const kfs = React.useMemo(() => {
         const result: KFInfo[] = [];
@@ -389,7 +630,49 @@ const BoneRow = memo(({ index, bt, frameWidth, onOpenCurveEditor, onSetFrame }: 
                         top: ROW_HEIGHT / 2 - 5,
                         outline: kf.hasCurve ? '2px solid #facc15' : 'none',
                     }}
-                    onContextMenu={e => { e.preventDefault(); onOpenCurveEditor(bt, kf); }}
+                    onContextMenu={e => {
+                        e.preventDefault();
+                        // Show context menu with options
+                        const menu = document.createElement('div');
+                        menu.className = 'absolute z-50 bg-[#282828] border border-[#444] rounded shadow-xl p-1 text-xs';
+                        menu.style.left = `${e.clientX}px`;
+                        menu.style.top = `${e.clientY}px`;
+                        menu.style.position = 'fixed';
+                        
+                        // Curve editor option
+                        const curveOption = document.createElement('div');
+                        curveOption.className = 'px-2 py-1 hover:bg-[#333] cursor-pointer';
+                        curveOption.textContent = '编辑曲线';
+                        curveOption.onclick = () => {
+                            onOpenCurveEditor(bt, kf);
+                            document.body.removeChild(menu);
+                        };
+                        menu.appendChild(curveOption);
+                        
+                        // Delete option
+                        const deleteOption = document.createElement('div');
+                        deleteOption.className = 'px-2 py-1 hover:bg-[#333] cursor-pointer text-red-400';
+                        deleteOption.textContent = '删除关键帧';
+                        deleteOption.onclick = () => {
+                            onDeleteKeyframe(bt, kf);
+                            document.body.removeChild(menu);
+                        };
+                        menu.appendChild(deleteOption);
+                        
+                        document.body.appendChild(menu);
+                        
+                        // Close menu when clicking elsewhere
+                        const closeMenu = () => {
+                            if (document.body.contains(menu)) {
+                                document.body.removeChild(menu);
+                            }
+                            document.removeEventListener('click', closeMenu);
+                        };
+                        
+                        setTimeout(() => {
+                            document.addEventListener('click', closeMenu);
+                        }, 100);
+                    }}
                     onClick={() => onSetFrame(kf.framePos)}
                 />
             ))}

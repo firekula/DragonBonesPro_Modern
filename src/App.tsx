@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect } from "react";
 import "./App.css";
-import { parseDragonBonesProject } from './ProjectParser';
+import { parseDragonBonesProject, exportDragonBonesProject } from './ProjectParser';
 import type { DragonBonesData, BoneData, SlotData, AnimationData } from './DataModel';
 import { CanvasRenderer } from './components/CanvasRenderer';
 import { SceneTree } from './components/SceneTree';
@@ -8,6 +8,7 @@ import { LayerPanel } from './components/LayerPanel';
 import { TopBar, type ToolType } from './components/TopBar';
 import { TimelinePanel } from './components/TimelinePanel';
 import { PropertiesPanel } from './components/PropertiesPanel';
+import { useUndo } from './hooks/useUndo';
 
 function App() {
     const renderStartTime = performance.now();
@@ -69,6 +70,31 @@ function App() {
         fileInputRef.current?.click();
     };
 
+    const handleExportClick = () => {
+        if (!projectData) {
+            alert('No project loaded. Please load a project first.');
+            return;
+        }
+
+        try {
+            const exportData = exportDragonBonesProject(projectData);
+            const jsonString = JSON.stringify(exportData, null, 2);
+            const blob = new Blob([jsonString], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${projectData.name || 'dragonbones'}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            console.log('Export successful');
+        } catch (error) {
+            console.error('Export failed:', error);
+            alert('Export failed. Please check the console for details.');
+        }
+    };
+
     const handleSelectBone = useCallback((name: string) => {
         setSelectedBone(name);
         setSelectedSlot(null);
@@ -84,29 +110,7 @@ function App() {
         setSelectedSlot(null);
     }, []);
 
-    // Handle mode change
-    const handleModeChange = useCallback(() => {
-        if (mode === 'animation') {
-            // Switch to edit mode: pause animation and reset to initial state
-            setIsPlaying(false);
-            setCurrentFrame(0);
-            setMode('edit');
-        } else {
-            // Switch to animation mode: start playing
-            setMode('animation');
-            setIsPlaying(true);
-        }
-    }, [mode]);
-
-    // Handle recording toggle: auto-stop playback when recording begins
-    const handleRecordToggle = useCallback(() => {
-        if (!isRecording) {
-            // Turning recording ON: stop playback first
-            setIsPlaying(false);
-        }
-        setIsRecording(!isRecording);
-    }, [isRecording]);
-
+    // --- Animation & Editing State ---
     /**
      * Pending transform edits in animation mode (stopped, non-recording).
      * Key format: "<type>:<name>" e.g. "bone:root" or "slot:body"
@@ -115,6 +119,61 @@ function App() {
     const [pendingEdits, setPendingEdits] = useState<Map<string, Record<string, number>>>(new Map());
     // Ref to hold transform snapshots for restoration
     const transformSnapshotRef = useRef<Map<string, Record<string, number>>>(new Map());
+
+    // --- Undo Stack ---
+    const { pushUndo, popUndo } = useUndo();
+
+    /** Discard any unsaved animation-mode edits by restoring snapshots. */
+    const discardPendingEdits = useCallback(() => {
+        if (transformSnapshotRef.current.size === 0) {
+            if (pendingEdits.size > 0) setPendingEdits(new Map());
+            return;
+        }
+        setProjectData(prev => {
+            if (!prev) return prev;
+            const arm = prev.armatures[0];
+            if (!arm) return prev;
+            transformSnapshotRef.current.forEach((snapshot, key) => {
+                const [type, name] = key.split(':');
+                if (type === 'bone') {
+                    const bone = arm.bones.find((b: BoneData) => b.name === name);
+                    if (bone) Object.assign(bone.localTransform, snapshot);
+                } else if (type === 'slot') {
+                    const skin = arm.skins?.[0];
+                    const skinSlot = skin?.slots.find((ss: any) => ss.name === name);
+                    if (skinSlot?.displays?.[0]) Object.assign(skinSlot.displays[0].transform, snapshot);
+                }
+            });
+            transformSnapshotRef.current.clear();
+            return { ...prev };
+        });
+        setPendingEdits(new Map());
+    }, [pendingEdits.size]);
+
+    // Handle recording toggle: auto-stop playback when recording begins
+    const handleRecordToggle = useCallback(() => {
+        if (!isRecording) {
+            // Turning recording ON: stop playback first, discard unsaved edits
+            setIsPlaying(false);
+            discardPendingEdits();
+        }
+        setIsRecording(!isRecording);
+    }, [isRecording, discardPendingEdits]);
+
+    // Handle mode change
+    const handleModeChange = useCallback(() => {
+        if (mode === 'animation') {
+            setIsPlaying(false);
+            discardPendingEdits();
+            setCurrentFrame(0, true);
+            setMode('edit');
+        } else {
+            setMode('animation');
+            // Starting playback in animation mode should discard any ad-hoc unsaved tweaks
+            discardPendingEdits();
+            setIsPlaying(true);
+        }
+    }, [mode, discardPendingEdits, setCurrentFrame]);
 
     // Get current armature and animation
     const armature = projectData?.armatures[0];
@@ -160,11 +219,18 @@ function App() {
         const arm = projectData.armatures[0];
         if (!arm || !selectedBone) return; // Only bone keyframes for now
 
-        let timeline = currentAnimation.bone.find(t => t.name === selectedBone);
+        // Get or create default layer
+        let layer = currentAnimation.layers[0];
+        if (!layer) {
+            layer = { name: "Default", visible: true, bone: [] };
+            currentAnimation.layers.push(layer);
+        }
+
+        let timeline = layer.bone.find(t => t.name === selectedBone);
         if (!timeline) {
             // Create empty timeline for this bone
             timeline = { name: selectedBone, translateFrame: [], rotateFrame: [], scaleFrame: [] };
-            currentAnimation.bone.push(timeline);
+            layer.bone.push(timeline);
         }
 
         const tf = selectedInfo.transform;
@@ -199,6 +265,44 @@ function App() {
         console.log('已保存关键帧:', selectedBone, '帧', currentFrame);
     }, [projectData, currentAnimation, selectedInfo, currentFrame, selectedBone]);
 
+    // Handle keyframe deletion
+    const handleDeleteKeyframe = useCallback((bt: any, kf: any) => {
+        if (!projectData || !currentAnimation) return;
+        
+        // Find the layer containing this bone timeline
+        let targetLayer = null;
+        for (const layer of currentAnimation.layers) {
+            if (layer.bone.includes(bt)) {
+                targetLayer = layer;
+                break;
+            }
+        }
+        
+        if (!targetLayer) return;
+        
+        const frames = kf.type === 'translate' ? bt.translateFrame : kf.type === 'rotate' ? bt.rotateFrame : bt.scaleFrame;
+        
+        if (frames.length <= 1) {
+            // Cannot delete the last keyframe
+            return;
+        }
+        
+        // Remove the keyframe
+        const deletedKF = frames.splice(kf.kfIndex, 1)[0];
+        
+        // If it's not the last keyframe, merge duration with the next keyframe
+        if (kf.kfIndex < frames.length) {
+            frames[kf.kfIndex].duration += deletedKF.duration;
+        }
+        // If it's the first keyframe, merge duration with the previous keyframe
+        else if (kf.kfIndex > 0) {
+            frames[kf.kfIndex - 1].duration += deletedKF.duration;
+        }
+        
+        setProjectData({ ...projectData });
+        console.log('已删除关键帧:', bt.name, kf.type, '帧', kf.framePos);
+    }, [projectData, currentAnimation]);
+
     // Animation playback loop
     useEffect(() => {
         if (!isPlaying || !currentAnimation || currentAnimation.duration <= 0 || mode === 'edit') return;
@@ -221,11 +325,13 @@ function App() {
 
                 if (animFrameRef.current >= currentAnimation.duration) {
                     if (currentAnimation.playTimes === 0) {
+                        // Loop forever
                         animFrameRef.current = 0;
                     } else {
+                        // Play specified number of times
                         animFrameRef.current = 0;
                         setIsPlaying(false);
-                        setCurrentFrame(0);
+                        setCurrentFrame(0, true);
                         return;
                     }
                 }
@@ -246,31 +352,42 @@ function App() {
 
         let rafId = requestAnimationFrame(tick);
         return () => cancelAnimationFrame(rafId);
-    }, [isPlaying, currentAnimation, armature, mode]);
+    }, [isPlaying, currentAnimation, armature, mode, setCurrentFrame, setIsPlaying]);
+
+    // Handle Undo (Ctrl+Z)
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.ctrlKey && e.key === 'z') {
+                const entry = popUndo();
+                if (!entry || !projectData) return;
+
+                const arm = projectData.armatures[0];
+                if (!arm) return;
+
+                const [type, name] = entry.key.split(':');
+                if (type === 'bone') {
+                    const bone = arm.bones.find((b: BoneData) => b.name === name);
+                    if (bone) Object.assign(bone.localTransform, entry.before);
+                } else if (type === 'slot') {
+                    const skin = arm.skins?.[0];
+                    const skinSlot = skin?.slots.find((ss: any) => ss.name === name);
+                    if (skinSlot?.displays?.[0]) Object.assign(skinSlot.displays[0].transform, entry.before);
+                }
+
+                setProjectData({ ...projectData });
+                console.log('Undo performed for:', entry.key);
+            }
+        };
+
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [popUndo, projectData]);
 
     /** Discard pending edits and restore transform snapshots, then change frame */
     const handleChangeFrame = useCallback((frame: number) => {
-        if (pendingEdits.size > 0 && projectData) {
-            // Restore snapshots
-            const arm = projectData.armatures[0];
-            if (arm) {
-                transformSnapshotRef.current.forEach((snapshot, key) => {
-                    const [type, name] = key.split(':');
-                    if (type === 'bone') {
-                        const bone = arm.bones.find((b: BoneData) => b.name === name);
-                        if (bone) Object.assign(bone.localTransform, snapshot);
-                    } else if (type === 'slot') {
-                        const skin = arm.skins?.[0];
-                        const skinSlot = skin?.slots.find((ss: any) => ss.name === name);
-                        if (skinSlot?.displays?.[0]) Object.assign(skinSlot.displays[0].transform, snapshot);
-                    }
-                });
-            }
-            transformSnapshotRef.current.clear();
-            setPendingEdits(new Map());
-        }
-        setCurrentFrame(frame);
-    }, [pendingEdits, projectData]);
+        discardPendingEdits();
+        setCurrentFrame(frame, true);
+    }, [discardPendingEdits, setCurrentFrame]);
 
     const handleMoveSlot = useCallback((slotName: string, direction: 'up' | 'down') => {
         if (!projectData) return;
@@ -356,15 +473,27 @@ function App() {
 
         // Recording mode: immediately write keyframe
         if (mode === 'animation' && isRecording && selectedBone && currentAnimation && itemKey) {
-            let timeline = currentAnimation.bone.find(t => t.name === selectedBone);
+            if (!currentAnimation.layers.length) {
+                currentAnimation.layers.push({ name: 'Base Layer', visible: true, bone: [] });
+            }
+            let timeline = currentAnimation.layers[0].bone.find((t: any) => t.name === selectedBone);
             if (!timeline) {
                 timeline = { name: selectedBone, translateFrame: [], rotateFrame: [], scaleFrame: [] };
-                currentAnimation.bone.push(timeline);
+                currentAnimation.layers[0].bone.push(timeline);
             }
         }
 
         setProjectData({ ...projectData });
     }, [selectedBone, selectedSlot, projectData, mode, isRecording, isPlaying, currentAnimation]);
+
+    const handleBeforeTransform = useCallback((key: string, transform: Record<string, number>) => {
+        // Capture for animation-mode discard if not already captured
+        const isAnimStopped = mode === 'animation' && !isPlaying;
+        const isNonRecordAnim = isAnimStopped && !isRecording;
+        if (isNonRecordAnim && !transformSnapshotRef.current.has(key)) {
+            transformSnapshotRef.current.set(key, { ...transform });
+        }
+    }, [mode, isPlaying, isRecording]);
 
     const renderDuration = performance.now() - renderStartTime;
     if (renderDuration > 15) {
@@ -384,6 +513,7 @@ function App() {
             {/* Menu Bar */}
             <TopBar
                 handleOpenClick={handleOpenClick}
+                handleExportClick={handleExportClick}
                 selectedTool={selectedTool}
                 setSelectedTool={setSelectedTool}
                 mode={mode}
@@ -458,6 +588,8 @@ function App() {
                                     frameEmitter={frameEmitter.current}
                                 selectedTool={selectedTool}
                                 onTransformChange={handleTransformChange}
+                                onUndoPush={pushUndo}
+                                onBeforeTransform={handleBeforeTransform}
                             />
                         ) : (
                             <>
@@ -490,13 +622,17 @@ function App() {
                             currentFrame={currentFrame}
                             currentFrameRef={currentFrameRef}
                             frameEmitter={frameEmitter.current}
-                            setCurrentFrame={(f: number) => setCurrentFrame(f, true)}
+                            setCurrentFrame={handleChangeFrame}
                             isPlaying={isPlaying}
-                            setIsPlaying={setIsPlaying}
+                            setIsPlaying={(playing) => {
+                                if (playing) discardPendingEdits();
+                                setIsPlaying(playing);
+                            }}
                             isRecording={isRecording}
                             handleRecordToggle={handleRecordToggle}
                             selectedInfo={selectedInfo as any}
                             handleSetKeyframe={handleSetKeyframe}
+                            handleDeleteKeyframe={handleDeleteKeyframe}
                             handleSelectBone={handleSelectBone}
                         />
                     )}

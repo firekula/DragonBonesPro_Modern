@@ -105,11 +105,25 @@ export interface BoneTimeline {
     scaleFrame: ScaleKeyframe[];
 }
 
+export interface AnimationLayer {
+    name: string;
+    visible: boolean;
+    bone: BoneTimeline[];
+}
+
+export interface AnimationClip {
+    name: string;
+    startTime: number; // Start frame
+    endTime: number; // End frame
+    loop: boolean;
+}
+
 export interface AnimationData {
     name: string;
     duration: number; // Total frames
     playTimes: number; // 0 = loop forever
-    bone: BoneTimeline[];
+    layers: AnimationLayer[];
+    clips: AnimationClip[];
 }
 
 export interface IKConstraintData {}

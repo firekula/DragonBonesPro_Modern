@@ -141,7 +141,7 @@ modern-editor/
 
 ### 9. 动画系统
 
-- **数据模型**：`AnimationData` → `BoneTimeline[]` → `TranslateKeyframe[]` / `RotateKeyframe[]` / `ScaleKeyframe[]`
+- **数据模型**：`AnimationData` → `AnimationLayer[]` → `BoneTimeline[]` → `TranslateKeyframe[]` / `RotateKeyframe[]` / `ScaleKeyframe[]`
 - **关键帧插值**：`AnimationPlayer.ts` — `lerpWithCurve` 支持 hold（无 tweenEasing）、线性（tweenEasing=0）、贝塞尔曲线（Newton-Raphson 数值求解 12 次迭代）
 - **贝塞尔曲线**：`DataModel.ts` 定义 `BezierCurve { cx1, cy1, cx2, cy2 }`，`ProjectParser.ts` 解析原始 `curve` 数组，`AnimationPlayer.ts` 自动选用
 - **播放循环**：`requestAnimationFrame` 驱动，按 `frameRate` 推进帧
@@ -149,6 +149,7 @@ modern-editor/
     - 停止+非录制：临时预览，切帧/播放自动还原快照
     - 录制模式：修改立即写入当前帧关键帧（开启录制自动暂停）
     - `handleSetKeyframe`：手动将当前 transform 写入 `currentFrame`，支持覆盖/分割插入
+    - `handleDeleteKeyframe`：删除选中的关键帧
 - **时间轴 UI** (`TimelinePanel.tsx`)：
     - **横向缩放 (Zoom)**：支持 0.5x - 5.0x 动态缩放，解决帧数少时挤在左侧的问题。
     - **极速渲染优化**：将播放头从每行渲染改为全局 Overlay 覆盖，引入 `BoneRow/BoneLabel` 的 `React.memo` 记忆化组件，播放流畅度提升 10 倍以上，告别掉帧。
@@ -160,7 +161,27 @@ modern-editor/
     - **右键关键帧**弹出贝塞尔曲线编辑器：Canvas 预览 + 4 个数值输入 + Linear/Ease In/Ease Out/Ease 预设。
     - 红色播放头精确对齐帧线。
 
-### 10. 窗口自适应
+### 10. 动画层管理
+
+- **层操作**：添加、删除、重命名动画层
+- **层控制**：显示/隐藏控制
+- **层顺序**：调整层的上下顺序
+- **层数据结构**：`AnimationLayer { name, visible, bone: BoneTimeline[] }`
+
+### 11. 动画片段管理
+
+- **片段操作**：创建、编辑、删除动画片段
+- **片段复用**：支持动画片段的复用
+- **片段预览**：实现片段的预览功能
+- **片段数据结构**：`AnimationClip { name, startTime, endTime, loop }`
+
+### 12. 动画导入/导出
+
+- **格式兼容**：确保与原始龙骨动画格式的兼容
+- **文件验证**：实现动画文件的导入/导出验证
+- **导出功能**：通过顶部菜单栏的 File 下拉菜单导出动画文件
+
+### 13. 窗口自适应
 
 - `ResizeObserver` 监听容器尺寸变化
 - 全屏/窗口切换自动刷新画布
@@ -176,10 +197,14 @@ DragonBonesData
 │   ├── skins: SkinData[]        // 皮肤 → SkinSlotData[] → DisplayData[]
 │   └── animations: AnimationData[]  // 动画
 │       ├── name, duration, playTimes
-│       └── bone: BoneTimeline[]
-│           ├── translateFrame: TranslateKeyframe[]  // {x, y, duration, tweenEasing, curve?}
-│           ├── rotateFrame: RotateKeyframe[]        // {rotate, duration, tweenEasing, curve?}
-│           └── scaleFrame: ScaleKeyframe[]          // {x, y, duration, tweenEasing, curve?}
+│       ├── layers: AnimationLayer[]
+│       │   ├── name, visible
+│       │   └── bone: BoneTimeline[]
+│       │       ├── translateFrame: TranslateKeyframe[]  // {x, y, duration, tweenEasing, curve?}
+│       │       ├── rotateFrame: RotateKeyframe[]        // {rotate, duration, tweenEasing, curve?}
+│       │       └── scaleFrame: ScaleKeyframe[]          // {x, y, duration, tweenEasing, curve?}
+│       └── clips: AnimationClip[]
+│           └── name, startTime, endTime, loop
 ├── images: Record<string, string>  // Blob URL 映射
 └── textureAtlas: { SubTexture[] }  // 贴图集 JSON
 

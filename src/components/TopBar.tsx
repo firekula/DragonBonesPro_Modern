@@ -5,6 +5,7 @@ export type ModeType = 'edit' | 'animation';
 
 interface TopBarProps {
     handleOpenClick: () => void;
+    handleExportClick: () => void;
     selectedTool: ToolType;
     setSelectedTool: (tool: ToolType) => void;
     mode: ModeType;
@@ -13,6 +14,7 @@ interface TopBarProps {
 
 export function TopBar({
     handleOpenClick,
+    handleExportClick,
     selectedTool,
     setSelectedTool,
     mode,
@@ -22,7 +24,11 @@ export function TopBar({
         <div className="flex items-center h-8 bg-[#383838] px-2 border-b border-[#1a1a1a]">
             <div className="flex gap-4">
                 <div className="relative group">
-                    <span className="cursor-pointer hover:text-white" onClick={handleOpenClick}>File (Open...)</span>
+                    <span className="cursor-pointer hover:text-white">File</span>
+                    <div className="absolute top-full left-0 bg-[#2a2a2a] border border-[#444] rounded shadow-lg w-32 hidden group-hover:block">
+                        <div className="p-1 cursor-pointer hover:bg-[#3a3a3a]" onClick={handleOpenClick}>Open...</div>
+                        <div className="p-1 cursor-pointer hover:bg-[#3a3a3a]" onClick={handleExportClick}>Export...</div>
+                    </div>
                 </div>
                 <span className="cursor-pointer hover:text-white">Edit</span>
                 <span className="cursor-pointer hover:text-white">View</span>

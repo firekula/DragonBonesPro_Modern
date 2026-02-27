@@ -23,6 +23,8 @@ interface CanvasRendererProps {
     frameEmitter?: EventTarget;
     selectedTool?: 'move' | 'scale' | 'rotate';
     onTransformChange?: (field: string, value: number) => void;
+    onUndoPush?: (entry: { key: string; before: Record<string, number>; after: Record<string, number> }) => void;
+    onBeforeTransform?: (key: string, transform: Record<string, number>) => void;
 }
 
 export function CanvasRenderer({
@@ -39,6 +41,8 @@ export function CanvasRenderer({
     currentFrame = 0,
     frameEmitter,
     onTransformChange,
+    onUndoPush,
+    onBeforeTransform,
 }: CanvasRendererProps) {
     const containerRef = useRef<HTMLDivElement>(null);
     const pixiAppRef = useRef<PIXI.Application | null>(null);
@@ -167,6 +171,12 @@ export function CanvasRenderer({
     useEffect(() => { selectedSlotRef.current = selectedSlot; }, [selectedSlot]);
     const onTransformChangeRef = useRef(onTransformChange);
     useEffect(() => { onTransformChangeRef.current = onTransformChange; }, [onTransformChange]);
+    const onUndoPushRef = useRef(onUndoPush);
+    useEffect(() => { onUndoPushRef.current = onUndoPush; }, [onUndoPush]);
+    const onBeforeTransformRef = useRef(onBeforeTransform);
+    useEffect(() => { onBeforeTransformRef.current = onBeforeTransform; }, [onBeforeTransform]);
+    // Ref to store snapshot at the start of a drag
+    const dragSnapshotRef = useRef<Record<string, number> | null>(null);
     // updateRenderingRef and updateBonesAndSpritesRef are set after those callbacks are defined below
 
     // Initialize scene when app is ready or project data changes
@@ -608,11 +618,11 @@ export function CanvasRenderer({
 
                     // Draw tool controls based on selectedTool
                     if (selectedTool === 'move') {
-                        ToolRenderer.drawMoveControls(outlineLayer, targetMatrix, controlSize, controlLineLength, arrowSize, handleToolTransformChange, handleToolDragEnd);
+                        ToolRenderer.drawMoveControls(outlineLayer, targetMatrix, controlSize, controlLineLength, arrowSize, handleToolTransformChange, handleToolDragStart, handleToolDragEnd);
                     } else if (selectedTool === 'scale') {
-                        ToolRenderer.drawScaleControls(outlineLayer, targetMatrix, controlSize, controlLineLength, handleToolTransformChange, handleToolDragEnd);
+                        ToolRenderer.drawScaleControls(outlineLayer, targetMatrix, controlSize, controlLineLength, handleToolTransformChange, handleToolDragStart, handleToolDragEnd);
                     } else if (selectedTool === 'rotate') {
-                        ToolRenderer.drawRotateControls(outlineLayer, targetMatrix, controlSize, controlLineLength, handleToolTransformChange, handleToolDragEnd);
+                        ToolRenderer.drawRotateControls(outlineLayer, targetMatrix, controlSize, controlLineLength, handleToolTransformChange, handleToolDragStart, handleToolDragEnd);
                     }
                 }
             }
@@ -899,8 +909,63 @@ export function CanvasRenderer({
     const handleToolTransformChangeRef = useRef(handleToolTransformChange);
     useEffect(() => { handleToolTransformChangeRef.current = handleToolTransformChange; }, [handleToolTransformChange]);
 
+    const handleToolDragStart = useCallback(() => {
+        isDraggingRef.current = true;
+        const arm = renderingRef.current.armature;
+        if (!arm) return;
+
+        let transform: any = null;
+        const boneName = selectedBoneRef.current;
+        const slotName = selectedSlotRef.current;
+        const key = boneName ? `bone:${boneName}` : slotName ? `slot:${slotName}` : null;
+
+        if (boneName) {
+            const bone = arm.bones.find((b: any) => b.name === boneName);
+            if (bone) transform = bone.localTransform;
+        } else if (slotName) {
+            const skin = arm.skins?.[0];
+            const skinSlot = skin?.slots.find((ss: any) => ss.name === slotName);
+            if (skinSlot?.displays?.[0]) transform = skinSlot.displays[0].transform;
+        }
+
+        if (transform && key) {
+            const snapshot = { ...transform };
+            dragSnapshotRef.current = snapshot;
+            if (onBeforeTransformRef.current) onBeforeTransformRef.current(key, snapshot);
+        }
+    }, []);
+
     const handleToolDragEnd = useCallback(() => {
         isDraggingRef.current = false;
+        
+        // Push to undo stack
+        const arm = renderingRef.current.armature;
+        const boneName = selectedBoneRef.current;
+        const slotName = selectedSlotRef.current;
+        const key = boneName ? `bone:${boneName}` : slotName ? `slot:${slotName}` : null;
+        const before = dragSnapshotRef.current;
+
+        if (arm && key && before && onUndoPushRef.current) {
+            let currentTransform: any = null;
+            if (boneName) {
+                const bone = arm.bones.find((b: any) => b.name === boneName);
+                if (bone) currentTransform = bone.localTransform;
+            } else if (slotName) {
+                const skin = arm.skins?.[0];
+                const skinSlot = skin?.slots.find((ss: any) => ss.name === slotName);
+                if (skinSlot?.displays?.[0]) currentTransform = skinSlot.displays[0].transform;
+            }
+
+            if (currentTransform) {
+                onUndoPushRef.current({
+                    key,
+                    before,
+                    after: { ...currentTransform }
+                });
+            }
+        }
+
+        dragSnapshotRef.current = null;
         updateRenderingRef.current();
         if (onTransformChangeRef.current) onTransformChangeRef.current('commit', 0);
     }, []);

@@ -1,5 +1,31 @@
 ## 2026-02-27
 
+### v1.2.0 — 动画系统全面增强
+
+- **新增（动画层管理）** `DataModel.ts` + `TimelinePanel.tsx`：
+    - 实现动画层的添加、删除、重命名功能
+    - 支持层的显示/隐藏控制
+    - 实现层的顺序调整
+    - 数据结构：`AnimationLayer { name, visible, bone: BoneTimeline[] }`
+- **新增（动画片段管理）** `DataModel.ts` + `TimelinePanel.tsx`：
+    - 实现动画片段的创建、编辑、删除
+    - 支持动画片段的复用
+    - 实现片段的预览功能
+    - 数据结构：`AnimationClip { name, startTime, endTime, loop }`
+- **新增（关键帧删除）** `App.tsx` + `TimelinePanel.tsx`：
+    - 实现 `handleDeleteKeyframe` 函数，支持删除选中的关键帧
+    - 时间轴 UI 支持右键删除关键帧
+- **新增（动画导出功能）** `ProjectParser.ts` + `TopBar.tsx`：
+    - 实现 `exportDragonBonesProject` 函数
+    - 顶部菜单栏添加 File 下拉菜单，包含导出选项
+    - 确保与原始龙骨动画格式的兼容
+- **优化（动画播放性能）** `AnimationPlayer.ts`：
+    - 优化动画层处理逻辑，只播放可见层的动画
+    - 确保动画播放帧率稳定在 60fps 以上
+- **修复（TypeScript 类型错误）**：
+    - 修复了 `AnimationData` 接口中 `bone` 属性的类型错误，改为使用 `layers` 属性
+    - 修复了 `ProjectParser.ts` 中缺少的类型导入
+
 ### v1.1.0 — 极速 60FPS 动画系统与订阅式渲染
 
 - **重大优化（动画播放性能）** `App.tsx` + `CanvasRenderer.tsx`：

@@ -48,6 +48,7 @@ export class ToolRenderer {
         controlLineLength: number,
         arrowSize: number,
         onTransformChange?: (field: string, value: number) => void,
+        onDragStart?: () => void,
         onDragEnd?: () => void,
     ) {
         const moveControls = new PIXI.Graphics();
@@ -78,6 +79,7 @@ export class ToolRenderer {
 
         if (onTransformChange) {
             addDragHandler(centerDot, outlineLayer, (e) => {
+                onDragStart?.();
                 let lastX = e.global.x;
                 let lastY = e.global.y;
                 return {
@@ -106,6 +108,7 @@ export class ToolRenderer {
 
         if (onTransformChange) {
             addDragHandler(xAxisHandle, outlineLayer, (e) => {
+                onDragStart?.();
                 let lastX = e.global.x;
                 return {
                     onMove: (moveEvent) => {
@@ -129,6 +132,7 @@ export class ToolRenderer {
 
         if (onTransformChange) {
             addDragHandler(yAxisHandle, outlineLayer, (e) => {
+                onDragStart?.();
                 let lastY = e.global.y;
                 return {
                     onMove: (moveEvent) => {
@@ -149,6 +153,7 @@ export class ToolRenderer {
         controlSize: number,
         controlLineLength: number,
         onTransformChange?: (field: string, value: number) => void,
+        onDragStart?: () => void,
         onDragEnd?: () => void,
     ) {
         const handles = [
@@ -173,6 +178,7 @@ export class ToolRenderer {
 
             if (onTransformChange) {
                 addDragHandler(handleControl, outlineLayer, (e) => {
+                    onDragStart?.();
                     let lastX = e.global.x;
                     let lastY = e.global.y;
                     return {
@@ -199,6 +205,7 @@ export class ToolRenderer {
         controlSize: number,
         controlLineLength: number,
         onTransformChange?: (field: string, value: number) => void,
+        onDragStart?: () => void,
         onDragEnd?: () => void,
     ) {
         // Rotation handle at bottom-right of the bone
@@ -212,6 +219,7 @@ export class ToolRenderer {
 
         if (onTransformChange) {
             addDragHandler(rotateControl, outlineLayer, (e) => {
+                onDragStart?.();
                 const rootContainer = outlineLayer.parent;
                 if (!rootContainer) return { onMove: () => {}, onUp: () => {} };
 

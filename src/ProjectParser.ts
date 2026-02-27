@@ -2,7 +2,7 @@ import JSZip from "jszip";
 import { AMF3 } from "amf3-ts";
 import { Buffer } from "buffer";
 import { SymbolTypes } from "./DataModel";
-import type { ArmatureData, DragonBonesData } from "./DataModel";
+import type { ArmatureData, DragonBonesData, BoneData, SlotData, SkinData } from "./DataModel";
 
 const DBPROJ_KEY = "DRAGONBONES_IS_BEST";
 
@@ -263,10 +263,89 @@ function parseArmature(rawObj: any): ArmatureData {
                 name: rawAnim.name || "default",
                 duration: rawAnim.duration || 0,
                 playTimes: rawAnim.playTimes !== undefined ? rawAnim.playTimes : 0,
-                bone: [],
+                layers: [],
+                clips: rawAnim.clips || [],
             };
 
-            if (rawAnim.bone && Array.isArray(rawAnim.bone)) {
+            if (rawAnim.layers && Array.isArray(rawAnim.layers)) {
+                // New format with layers
+                for (const rawLayer of rawAnim.layers) {
+                    const layerData: any = {
+                        name: rawLayer.name || "Layer",
+                        visible: rawLayer.visible !== false,
+                        bone: [],
+                    };
+
+                    if (rawLayer.bone && Array.isArray(rawLayer.bone)) {
+                        for (const rawBoneTimeline of rawLayer.bone) {
+                            const boneTimeline: any = {
+                                name: rawBoneTimeline.name || "",
+                                translateFrame: [],
+                                rotateFrame: [],
+                                scaleFrame: [],
+                            };
+
+                            // Parse translate keyframes
+                            if (rawBoneTimeline.translateFrame && Array.isArray(rawBoneTimeline.translateFrame)) {
+                                for (const kf of rawBoneTimeline.translateFrame) {
+                                    boneTimeline.translateFrame.push({
+                                        duration: kf.duration || 0,
+                                        x: kf.x || 0,
+                                        y: kf.y || 0,
+                                        tweenEasing: kf.tweenEasing !== undefined ? kf.tweenEasing : null,
+                                        curve:
+                                            Array.isArray(kf.curve) && kf.curve.length >= 4
+                                                ? { cx1: kf.curve[0], cy1: kf.curve[1], cx2: kf.curve[2], cy2: kf.curve[3] }
+                                                : undefined,
+                                    });
+                                }
+                            }
+
+                            // Parse rotate keyframes
+                            if (rawBoneTimeline.rotateFrame && Array.isArray(rawBoneTimeline.rotateFrame)) {
+                                for (const kf of rawBoneTimeline.rotateFrame) {
+                                    boneTimeline.rotateFrame.push({
+                                        duration: kf.duration || 0,
+                                        rotate: kf.rotate || 0,
+                                        tweenEasing: kf.tweenEasing !== undefined ? kf.tweenEasing : null,
+                                        curve:
+                                            Array.isArray(kf.curve) && kf.curve.length >= 4
+                                                ? { cx1: kf.curve[0], cy1: kf.curve[1], cx2: kf.curve[2], cy2: kf.curve[3] }
+                                                : undefined,
+                                    });
+                                }
+                            }
+
+                            // Parse scale keyframes
+                            if (rawBoneTimeline.scaleFrame && Array.isArray(rawBoneTimeline.scaleFrame)) {
+                                for (const kf of rawBoneTimeline.scaleFrame) {
+                                    boneTimeline.scaleFrame.push({
+                                        duration: kf.duration || 0,
+                                        x: kf.x !== undefined ? kf.x : 1,
+                                        y: kf.y !== undefined ? kf.y : 1,
+                                        tweenEasing: kf.tweenEasing !== undefined ? kf.tweenEasing : null,
+                                        curve:
+                                            Array.isArray(kf.curve) && kf.curve.length >= 4
+                                                ? { cx1: kf.curve[0], cy1: kf.curve[1], cx2: kf.curve[2], cy2: kf.curve[3] }
+                                                : undefined,
+                                    });
+                                }
+                            }
+
+                            layerData.bone.push(boneTimeline);
+                        }
+                    }
+
+                    animData.layers.push(layerData);
+                }
+            } else if (rawAnim.bone && Array.isArray(rawAnim.bone)) {
+                // Legacy format without layers - create a default layer
+                const defaultLayer: any = {
+                    name: "Default",
+                    visible: true,
+                    bone: [],
+                };
+
                 for (const rawBoneTimeline of rawAnim.bone) {
                     const boneTimeline: any = {
                         name: rawBoneTimeline.name || "",
@@ -322,8 +401,10 @@ function parseArmature(rawObj: any): ArmatureData {
                         }
                     }
 
-                    animData.bone.push(boneTimeline);
+                    defaultLayer.bone.push(boneTimeline);
                 }
+
+                animData.layers.push(defaultLayer);
             }
 
             armature.animations.push(animData);
@@ -336,4 +417,134 @@ function parseArmature(rawObj: any): ArmatureData {
     );
 
     return armature;
+}
+
+/**
+ * Exports the DragonBones Data Model to a JSON format compatible with DragonBones.
+ */
+export function exportDragonBonesProject(data: DragonBonesData): any {
+    const exportData: any = {
+        name: data.name,
+        version: data.version,
+        frameRate: data.frameRate,
+        armature: data.armatures.map(exportArmature)
+    };
+
+    return exportData;
+}
+
+function exportArmature(armature: ArmatureData): any {
+    const exportArmature: any = {
+        name: armature.name,
+        type: armature.type === SymbolTypes.ARMATURE ? "armature" : 
+              armature.type === SymbolTypes.MC ? "movieClip" : 
+              armature.type === SymbolTypes.STAGE ? "stage" : "armature",
+        frameRate: armature.frameRate,
+        bone: armature.bones.map(exportBone),
+        slot: armature.slots.map(exportSlot),
+        skin: armature.skins.map(exportSkin),
+        animation: armature.animations.map(exportAnimation)
+    };
+
+    return exportArmature;
+}
+
+function exportBone(bone: BoneData): any {
+    return {
+        name: bone.name,
+        parent: bone.parentBoneName,
+        length: bone.length,
+        transform: {
+            x: bone.localTransform.x,
+            y: bone.localTransform.y,
+            skX: bone.localTransform.skewX,
+            skY: bone.localTransform.skewY,
+            scX: bone.localTransform.scaleX,
+            scY: bone.localTransform.scaleY
+        },
+        inheritRotation: bone.inheritRotation,
+        inheritScale: bone.inheritScale
+    };
+}
+
+function exportSlot(slot: SlotData): any {
+    return {
+        name: slot.name,
+        parent: slot.parentBoneName,
+        blendMode: slot.blendMode,
+        z: slot.zOrder,
+        displayIndex: slot.displayIndex
+    };
+}
+
+function exportSkin(skin: SkinData): any {
+    return {
+        name: skin.name,
+        slot: skin.slots.map(exportSkinSlot)
+    };
+}
+
+function exportSkinSlot(slot: any): any {
+    return {
+        name: slot.name,
+        display: slot.displays.map((display: any) => ({
+            name: display.name,
+            path: display.path,
+            type: display.type,
+            transform: {
+                x: display.transform.x,
+                y: display.transform.y,
+                skX: display.transform.skewX,
+                skY: display.transform.skewY,
+                scX: display.transform.scaleX,
+                scY: display.transform.scaleY
+            }
+        }))
+    };
+}
+
+function exportAnimation(animation: any): any {
+    const exportAnimation: any = {
+        name: animation.name,
+        duration: animation.duration,
+        playTimes: animation.playTimes,
+        layers: animation.layers.map(exportLayer),
+        clips: animation.clips || []
+    };
+
+    return exportAnimation;
+}
+
+function exportLayer(layer: any): any {
+    return {
+        name: layer.name,
+        visible: layer.visible,
+        bone: layer.bone.map(exportBoneTimeline)
+    };
+}
+
+function exportBoneTimeline(timeline: any): any {
+    return {
+        name: timeline.name,
+        translateFrame: timeline.translateFrame.map((kf: any) => ({
+            duration: kf.duration,
+            x: kf.x,
+            y: kf.y,
+            tweenEasing: kf.tweenEasing,
+            curve: kf.curve ? [kf.curve.cx1, kf.curve.cy1, kf.curve.cx2, kf.curve.cy2] : undefined
+        })),
+        rotateFrame: timeline.rotateFrame.map((kf: any) => ({
+            duration: kf.duration,
+            rotate: kf.rotate,
+            tweenEasing: kf.tweenEasing,
+            curve: kf.curve ? [kf.curve.cx1, kf.curve.cy1, kf.curve.cx2, kf.curve.cy2] : undefined
+        })),
+        scaleFrame: timeline.scaleFrame.map((kf: any) => ({
+            duration: kf.duration,
+            x: kf.x,
+            y: kf.y,
+            tweenEasing: kf.tweenEasing,
+            curve: kf.curve ? [kf.curve.cx1, kf.curve.cy1, kf.curve.cx2, kf.curve.cy2] : undefined
+        }))
+    };
 }
